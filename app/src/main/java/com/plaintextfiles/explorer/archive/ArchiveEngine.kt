@@ -232,7 +232,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                     zf.getInputStream(header).use { readCappedBytes(it, maxBytes) }
                 }
                 ArchiveFormat.SEVEN_Z -> {
-                    SevenZFile.builder().setFile(archiveFile).get().use { sz ->
+                    SevenZFile(archiveFile).use { sz ->
                         var entry = sz.nextEntry
                         while (entry != null) {
                             if (entry.name.trim('/') == targetClean && !entry.isDirectory) {
@@ -254,12 +254,12 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                 }
                 ArchiveFormat.TAR, ArchiveFormat.TAR_GZ, ArchiveFormat.TAR_BZ2, ArchiveFormat.TAR_XZ -> {
                     openTarInputStream(archiveFile, format).use { tis ->
-                        var entry = tis.nextEntry
+                        var entry = tis.nextTarEntry
                         while (entry != null) {
                             if (entry.name.trim('/') == targetClean && !entry.isDirectory) {
                                 return@use readCappedBytes(tis, maxBytes)
                             }
-                            entry = tis.nextEntry
+                            entry = tis.nextTarEntry
                         }
                         null
                     }
@@ -337,7 +337,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                 }
 
                 ArchiveFormat.SEVEN_Z -> {
-                    SevenZFile.builder().setFile(archiveFile).get().use { sevenZ ->
+                    SevenZFile(archiveFile).use { sevenZ ->
                         val buffer = ByteArray(32 * 1024)
                         var entry = sevenZ.nextEntry
                         while (entry != null) {
@@ -367,7 +367,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
 
                 ArchiveFormat.TAR, ArchiveFormat.TAR_GZ, ArchiveFormat.TAR_BZ2, ArchiveFormat.TAR_XZ -> {
                     openTarInputStream(archiveFile, format).use { tis ->
-                        var entry = tis.nextEntry
+                        var entry = tis.nextTarEntry
                         while (entry != null) {
                             if (matchesFilter(entry.name)) {
                                 val outFile = resolveSafeOutputFile(baseDestDir, canonicalDestRoot, entry.name)
@@ -385,7 +385,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                                     extractedCount++
                                 }
                             }
-                            entry = tis.nextEntry
+                            entry = tis.nextTarEntry
                         }
                     }
                 }
@@ -453,7 +453,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
 
                 ArchiveFormat.SEVEN_Z -> {
                     SevenZOutputFile(outputFile).use { sevenZOut ->
-                        sevenZOut.setContentMethods(listOf(org.apache.commons.compress.archivers.sevenz.SevenZMethodConfiguration(SevenZMethod.LZMA2)))
+                        sevenZOut.setContentCompression(SevenZMethod.LZMA2)
                         val buffer = ByteArray(32 * 1024)
                         fun addSevenZRecursive(file: File, relativePath: String) {
                             val entryName = if (file.isDirectory) "$relativePath/" else relativePath
@@ -574,7 +574,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                     }
                 }
                 ArchiveFormat.SEVEN_Z -> {
-                    SevenZFile.builder().setFile(archiveFile).get().use { sz ->
+                    SevenZFile(archiveFile).use { sz ->
                         var entry = sz.nextEntry
                         while (entry != null) {
                             if (!entry.isDirectory) {
@@ -591,7 +591,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                 }
                 ArchiveFormat.TAR, ArchiveFormat.TAR_GZ, ArchiveFormat.TAR_BZ2, ArchiveFormat.TAR_XZ -> {
                     openTarInputStream(archiveFile, format).use { tis ->
-                        var entry = tis.nextEntry
+                        var entry = tis.nextTarEntry
                         while (entry != null) {
                             if (!entry.isDirectory) {
                                 var r = tis.read(sink)
@@ -601,7 +601,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                                 }
                                 verifiedFiles++
                             }
-                            entry = tis.nextEntry
+                            entry = tis.nextTarEntry
                         }
                     }
                 }
@@ -647,7 +647,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                 }
             }
             ArchiveFormat.SEVEN_Z -> {
-                SevenZFile.builder().setFile(archiveFile).get().use { sevenZ ->
+                SevenZFile(archiveFile).use { sevenZ ->
                     for (entry in sevenZ.entries) {
                         nodes.add(
                             RawArchiveNode(
@@ -676,7 +676,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                                 crc32 = null
                             )
                         )
-                        entry = tis.nextEntry
+                        entry = tis.nextTarEntry
                     }
                 }
             }
@@ -720,7 +720,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
     }
 
     private fun resolveSafeOutputFile(destRoot: File, canonicalDestRoot: String, entryName: String): File {
-        val cleanEntry = entryName.trimStart('/', '\')
+        val cleanEntry = entryName.trimStart('/', '\\')
         val target = File(destRoot, cleanEntry)
         val canonicalTarget = target.canonicalPath
         if (!canonicalTarget.startsWith(canonicalDestRoot)) {

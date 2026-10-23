@@ -472,8 +472,7 @@ class FileSystemRepository(private val context: Context) {
             String(slice, Charsets.UTF_8)
                 .lineSequence()
                 .take(30)
-                .joinToString("
-")
+                .joinToString("\n")
         }.getOrNull()
     }
 
