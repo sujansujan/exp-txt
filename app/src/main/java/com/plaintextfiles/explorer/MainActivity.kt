@@ -59,7 +59,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val state by viewModel.uiState.collectAsState()
-            PlainTextTheme(themeMode = state.themeMode) {
+            PlainTextTheme(themeMode = state.settings.themeMode) {
                 ExplorerScreen(
                     viewModel = viewModel,
                     onRequestAllFilesPermission = { requestAllFilesPermission() },
@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        viewModel.refreshPermissionAndRoots()
+        viewModel.refreshPermissionState()
     }
 
     private fun requestAllFilesPermission() {
@@ -97,6 +97,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Always opens any selected file in its default Android system app via FileProvider.
+     */
     private fun openFileWithSystem(file: File) {
         runCatching {
             val uri = FileProvider.getUriForFile(
@@ -107,11 +110,33 @@ class MainActivity : ComponentActivity() {
             val mime = FileSystemRepository.resolveMimeType(file.name, file.isDirectory)
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mime)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                )
             }
-            startActivity(Intent.createChooser(intent, "Open ${file.name}"))
-        }.onFailure { err ->
-            Toast.makeText(this, "Cannot open ${file.name}: ${err.message}", Toast.LENGTH_SHORT).show()
+            startActivity(intent)
+        }.onFailure {
+            // Fallback with chooser and wildcard MIME if no direct default handler matched
+            runCatching {
+                val uri = FileProvider.getUriForFile(
+                    this,
+                    "$packageName.fileprovider",
+                    file
+                )
+                val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "*/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(fallbackIntent, "Open ${file.name}"))
+            }.onFailure { err ->
+                Toast.makeText(
+                    this,
+                    "No app found to open ${file.name}: ${err.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
         }
     }
 

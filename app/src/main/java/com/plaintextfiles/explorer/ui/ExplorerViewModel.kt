@@ -6,32 +6,36 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.plaintextfiles.explorer.archive.ArchiveEngine
 import com.plaintextfiles.explorer.data.FileSystemRepository
+import com.plaintextfiles.explorer.model.AppSettings
 import com.plaintextfiles.explorer.model.ArchiveFormat
 import com.plaintextfiles.explorer.model.ClipboardBuffer
 import com.plaintextfiles.explorer.model.ClipboardMode
 import com.plaintextfiles.explorer.model.DualPaneMode
 import com.plaintextfiles.explorer.model.FileDetailedInfo
 import com.plaintextfiles.explorer.model.FileEntry
+import com.plaintextfiles.explorer.model.FontScalePreset
 import com.plaintextfiles.explorer.model.PaneId
 import com.plaintextfiles.explorer.model.PaneState
+import com.plaintextfiles.explorer.model.RowDensity
 import com.plaintextfiles.explorer.model.SortConfig
 import com.plaintextfiles.explorer.model.SortField
-import com.plaintextfiles.explorer.model.StorageRootInfo
+import com.plaintextfiles.explorer.model.SortOrder
 import com.plaintextfiles.explorer.model.ThemeMode
+import com.plaintextfiles.explorer.model.TransferProgress
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 sealed interface PlainDialogState {
+    data class ItemActionMenu(val paneId: PaneId, val entries: List<FileEntry>) : PlainDialogState
+    data class SortModal(val paneId: PaneId) : PlainDialogState
     data class CreateFolder(val paneId: PaneId) : PlainDialogState
-    data class CreateTextFile(val paneId: PaneId) : PlainDialogState
+    data class CreateFile(val paneId: PaneId) : PlainDialogState
     data class RenameEntry(val paneId: PaneId, val entry: FileEntry) : PlainDialogState
+    data class BatchRename(val paneId: PaneId, val entries: List<FileEntry>) : PlainDialogState
     data class DeleteConfirm(val paneId: PaneId, val entries: List<FileEntry>) : PlainDialogState
     data class CompressArchive(
         val paneId: PaneId,
@@ -52,38 +56,31 @@ sealed interface PlainDialogState {
         val paneId: PaneId,
         val archivePath: String
     ) : PlainDialogState
-    data class TextViewerEditor(
-        val paneId: PaneId,
-        val entry: FileEntry,
-        val content: String,
-        val isReadOnly: Boolean
-    ) : PlainDialogState
 }
 
 data class ExplorerUiState(
-    val themeMode: ThemeMode = ThemeMode.DRACULA,
-    val dualPaneMode: DualPaneMode = DualPaneMode.SPLIT_VERTICAL,
+    val settings: AppSettings = AppSettings(),
+    val isSettingsOpen: Boolean = false,
     val activePaneId: PaneId = PaneId.PANE_A,
     val paneA: PaneState = PaneState(paneId = PaneId.PANE_A, currentPath = "/storage/emulated/0"),
     val paneB: PaneState = PaneState(paneId = PaneId.PANE_B, currentPath = "/storage/emulated/0/Download"),
-    val storageRoots: List<StorageRootInfo> = emptyList(),
+    val pinnedPaths: Set<String> = emptySet(),
     val hasStoragePermission: Boolean = false,
-    val highlightedPaneId: PaneId? = null,
-    val highlightedEntry: FileEntry? = null,
-    val highlightedDetails: FileDetailedInfo? = null,
+    val detailsPaneId: PaneId? = null,
+    val detailsEntry: FileEntry? = null,
+    val detailsInfo: FileDetailedInfo? = null,
     val isLoadingDetails: Boolean = false,
     val activeDialog: PlainDialogState? = null,
     val clipboard: ClipboardBuffer? = null,
-    val isBusy: Boolean = false,
-    val statusLog: String = "Ready",
-    val lastRefreshTime: String = "--:--:--"
+    val transferProgress: TransferProgress? = null,
+    val toastMessage: String? = null
 ) {
     fun getPane(id: PaneId): PaneState = if (id == PaneId.PANE_A) paneA else paneB
 }
 
 class ExplorerViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val prefs = application.getSharedPreferences("plaintextfiles_prefs", Context.MODE_PRIVATE)
+    private val prefs = application.getSharedPreferences("exp_txt_prefs_v4", Context.MODE_PRIVATE)
     val fileRepo = FileSystemRepository(application.applicationContext)
     val archiveEngine = ArchiveEngine(fileRepo)
 
@@ -91,90 +88,176 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     val uiState: StateFlow<ExplorerUiState> = _uiState.asStateFlow()
 
     init {
-        val savedTheme = prefs.getString("theme_mode", ThemeMode.DRACULA.name)
-            ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
-            ?: ThemeMode.DRACULA
+        val loadedSettings = loadSettingsFromPrefs()
+        val loadedPins = prefs.getStringSet("pinned_paths", emptySet())?.toSet() ?: emptySet()
 
-        val savedLayout = prefs.getString("dual_pane_mode", DualPaneMode.SPLIT_VERTICAL.name)
-            ?.let { runCatching { DualPaneMode.valueOf(it) }.getOrNull() }
-            ?: DualPaneMode.SPLIT_VERTICAL
+        val rootPath = fileRepo.internalStorageRoot()
+        val defaultDownload = File(rootPath, "Download").takeIf { it.exists() }?.absolutePath ?: rootPath
 
-        val startA = fileRepo.defaultStartDirectory()
-        val downloadDir = File(startA, "Download").takeIf { it.exists() }?.absolutePath ?: startA
+        val startA = if (loadedSettings.rememberLastPaths) {
+            prefs.getString("last_path_a", rootPath)?.takeIf { File(it).exists() } ?: rootPath
+        } else {
+            rootPath
+        }
+        val startB = if (loadedSettings.rememberLastPaths) {
+            prefs.getString("last_path_b", defaultDownload)?.takeIf { File(it).exists() } ?: defaultDownload
+        } else {
+            defaultDownload
+        }
+
+        val initialSort = SortConfig(
+            field = SortField.NAME,
+            order = SortOrder.ASCENDING,
+            foldersFirst = loadedSettings.foldersFirst,
+            showHidden = loadedSettings.showHidden
+        )
 
         _uiState.update {
             it.copy(
-                themeMode = savedTheme,
-                dualPaneMode = savedLayout,
+                settings = loadedSettings,
+                pinnedPaths = loadedPins,
                 hasStoragePermission = fileRepo.hasAllFilesAccess(),
-                paneA = it.paneA.copy(currentPath = startA),
-                paneB = it.paneB.copy(currentPath = downloadDir),
-                lastRefreshTime = currentClockString()
+                paneA = it.paneA.copy(currentPath = startA, sortConfig = initialSort),
+                paneB = it.paneB.copy(currentPath = startB, sortConfig = initialSort)
             )
         }
 
-        refreshPermissionAndRoots()
         loadPaneDirectory(PaneId.PANE_A, startA, recordHistory = false)
-        loadPaneDirectory(PaneId.PANE_B, downloadDir, recordHistory = false)
+        loadPaneDirectory(PaneId.PANE_B, startB, recordHistory = false)
     }
 
-    fun refreshPermissionAndRoots() {
-        val granted = fileRepo.hasAllFilesAccess()
-        val roots = fileRepo.discoverStorageRoots()
-        _uiState.update {
-            it.copy(
-                hasStoragePermission = granted,
-                storageRoots = roots,
-                lastRefreshTime = currentClockString()
+    private fun loadSettingsFromPrefs(): AppSettings {
+        val theme = prefs.getString("theme_mode", ThemeMode.DRACULA.name)
+            ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.DRACULA
+        val layout = prefs.getString("dual_pane_mode", DualPaneMode.SPLIT_VERTICAL.name)
+            ?.let { runCatching { DualPaneMode.valueOf(it) }.getOrNull() } ?: DualPaneMode.SPLIT_VERTICAL
+        val density = prefs.getString("row_density", RowDensity.COMPACT.name)
+            ?.let { runCatching { RowDensity.valueOf(it) }.getOrNull() } ?: RowDensity.COMPACT
+        val font = prefs.getString("font_scale", FontScalePreset.NORMAL.name)
+            ?.let { runCatching { FontScalePreset.valueOf(it) }.getOrNull() } ?: FontScalePreset.NORMAL
+
+        return AppSettings(
+            themeMode = theme,
+            dualPaneMode = layout,
+            rowDensity = density,
+            fontScale = font,
+            showFileIcons = prefs.getBoolean("show_file_icons", true),
+            showPermissionSubtitle = prefs.getBoolean("show_permission_subtitle", false),
+            foldersFirst = prefs.getBoolean("folders_first", true),
+            showHidden = prefs.getBoolean("show_hidden", false),
+            globalPinnedAtTop = prefs.getBoolean("global_pinned_at_top", true),
+            rememberLastPaths = prefs.getBoolean("remember_last_paths", true),
+            enableRowSwipeGesture = prefs.getBoolean("enable_row_swipe", true),
+            splitRatio = prefs.getFloat("split_ratio", 0.50f).coerceIn(0.22f, 0.78f)
+        )
+    }
+
+    fun updateSettings(transform: (AppSettings) -> AppSettings) {
+        val next = transform(_uiState.value.settings)
+        prefs.edit()
+            .putString("theme_mode", next.themeMode.name)
+            .putString("dual_pane_mode", next.dualPaneMode.name)
+            .putString("row_density", next.rowDensity.name)
+            .putString("font_scale", next.fontScale.name)
+            .putBoolean("show_file_icons", next.showFileIcons)
+            .putBoolean("show_permission_subtitle", next.showPermissionSubtitle)
+            .putBoolean("folders_first", next.foldersFirst)
+            .putBoolean("show_hidden", next.showHidden)
+            .putBoolean("global_pinned_at_top", next.globalPinnedAtTop)
+            .putBoolean("remember_last_paths", next.rememberLastPaths)
+            .putBoolean("enable_row_swipe", next.enableRowSwipeGesture)
+            .putFloat("split_ratio", next.splitRatio.coerceIn(0.22f, 0.78f))
+            .apply()
+
+        _uiState.update { state ->
+            state.copy(
+                settings = next,
+                paneA = state.paneA.copy(
+                    sortConfig = state.paneA.sortConfig.copy(
+                        foldersFirst = next.foldersFirst,
+                        showHidden = next.showHidden
+                    )
+                ),
+                paneB = state.paneB.copy(
+                    sortConfig = state.paneB.sortConfig.copy(
+                        foldersFirst = next.foldersFirst,
+                        showHidden = next.showHidden
+                    )
+                )
             )
         }
-    }
-
-    fun refreshAllPanes() {
-        refreshPermissionAndRoots()
         reloadPane(PaneId.PANE_A)
         reloadPane(PaneId.PANE_B)
     }
 
-    fun setThemeMode(mode: ThemeMode) {
-        prefs.edit().putString("theme_mode", mode.name).apply()
-        _uiState.update {
-            it.copy(
-                themeMode = mode,
-                statusLog = "Theme set to ${mode.name} Classic"
-            )
+    fun updateSplitRatio(newRatio: Float) {
+        val clamped = newRatio.coerceIn(0.22f, 0.78f)
+        prefs.edit().putFloat("split_ratio", clamped).apply()
+        _uiState.update { it.copy(settings = it.settings.copy(splitRatio = clamped)) }
+    }
+
+    fun openSettingsScreen() {
+        _uiState.update { it.copy(isSettingsOpen = true) }
+    }
+
+    fun closeSettingsScreen() {
+        _uiState.update { it.copy(isSettingsOpen = false) }
+    }
+
+    fun refreshPermissionState() {
+        val granted = fileRepo.hasAllFilesAccess()
+        val prev = _uiState.value.hasStoragePermission
+        _uiState.update { it.copy(hasStoragePermission = granted) }
+        if (granted && !prev) {
+            refreshAllPanes()
         }
     }
 
-    fun toggleThemeMode() {
-        val next = if (_uiState.value.themeMode == ThemeMode.DRACULA) {
-            ThemeMode.ALUCARD
-        } else {
-            ThemeMode.DRACULA
-        }
-        setThemeMode(next)
-    }
-
-    fun setDualPaneMode(mode: DualPaneMode) {
-        prefs.edit().putString("dual_pane_mode", mode.name).apply()
-        _uiState.update {
-            it.copy(
-                dualPaneMode = mode,
-                statusLog = "Layout: ${mode.description}"
-            )
-        }
-    }
-
-    fun cycleDualPaneMode() {
-        val modes = DualPaneMode.entries
-        val nextIdx = (modes.indexOf(_uiState.value.dualPaneMode) + 1) % modes.size
-        setDualPaneMode(modes[nextIdx])
+    fun refreshAllPanes() {
+        _uiState.update { it.copy(hasStoragePermission = fileRepo.hasAllFilesAccess()) }
+        reloadPane(PaneId.PANE_A)
+        reloadPane(PaneId.PANE_B)
     }
 
     fun setActivePane(paneId: PaneId) {
         if (_uiState.value.activePaneId != paneId) {
             _uiState.update { it.copy(activePaneId = paneId) }
         }
+    }
+
+    // Pinned Items Management (Always at Top of Main List)
+    fun togglePinEntry(entry: FileEntry) {
+        if (entry.isVirtualArchiveEntry) return
+        val currentPins = _uiState.value.pinnedPaths.toMutableSet()
+        val added = if (entry.path in currentPins) {
+            currentPins.remove(entry.path)
+            false
+        } else {
+            currentPins.add(entry.path)
+            true
+        }
+        prefs.edit().putStringSet("pinned_paths", currentPins).apply()
+        _uiState.update {
+            it.copy(
+                pinnedPaths = currentPins,
+                activeDialog = null,
+                toastMessage = if (added) "Pinned [${entry.name}] to top of list" else "Unpinned [${entry.name}]"
+            )
+        }
+        reloadPane(PaneId.PANE_A)
+        reloadPane(PaneId.PANE_B)
+    }
+
+    fun clearAllPinnedItems() {
+        prefs.edit().putStringSet("pinned_paths", emptySet()).apply()
+        _uiState.update {
+            it.copy(
+                pinnedPaths = emptySet(),
+                toastMessage = "Cleared all pinned items"
+            )
+        }
+        reloadPane(PaneId.PANE_A)
+        reloadPane(PaneId.PANE_B)
     }
 
     fun reloadPane(paneId: PaneId) {
@@ -198,7 +281,8 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         recordHistory: Boolean = true
     ) {
         viewModelScope.launch {
-            val currentPane = _uiState.value.getPane(paneId)
+            val stateSnapshot = _uiState.value
+            val currentPane = stateSnapshot.getPane(paneId)
             val updatedHistory = if (recordHistory &&
                 (currentPane.currentPath != targetPath || currentPane.activeArchivePath != null)
             ) {
@@ -208,6 +292,11 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 )
             } else {
                 currentPane.historyBackStack
+            }
+
+            if (stateSnapshot.settings.rememberLastPaths) {
+                val key = if (paneId == PaneId.PANE_A) "last_path_a" else "last_path_b"
+                prefs.edit().putString(key, targetPath).apply()
             }
 
             updatePaneState(paneId) {
@@ -221,7 +310,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             }
 
             val statPair = fileRepo.queryStatFs(File(targetPath))
-            val result = fileRepo.listDirectory(targetPath, currentPane.sortConfig)
+            val result = fileRepo.listDirectory(
+                dirPath = targetPath,
+                sortConfig = _uiState.value.getPane(paneId).sortConfig,
+                pinnedPaths = _uiState.value.pinnedPaths,
+                globalPinnedAtTop = _uiState.value.settings.globalPinnedAtTop
+            )
 
             result.fold(
                 onSuccess = { items ->
@@ -239,12 +333,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                             totalFreeBytes = statPair.second
                         )
                     }
-                    _uiState.update {
-                        it.copy(
-                            lastRefreshTime = currentClockString(),
-                            statusLog = "${paneId.shortCode}: Loaded ${items.size} items in ${targetPath.substringAfterLast('/').ifEmpty { "/" }}"
-                        )
-                    }
                 },
                 onFailure = { err ->
                     updatePaneState(paneId) { pane ->
@@ -253,7 +341,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                             entries = emptyList(),
                             filteredEntries = emptyList(),
                             isLoading = false,
-                            errorMessage = err.message ?: "Unable to read directory",
+                            errorMessage = err.message ?: "Unable to read folder",
                             historyBackStack = updatedHistory.takeLast(40)
                         )
                     }
@@ -281,9 +369,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 currentPane.historyBackStack
             }
 
-            updatePaneState(paneId) {
-                it.copy(isLoading = true, errorMessage = null)
-            }
+            updatePaneState(paneId) { it.copy(isLoading = true, errorMessage = null) }
 
             val result = archiveEngine.listVirtualDirectory(
                 archivePath = archivePath,
@@ -308,27 +394,19 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                             historyBackStack = updatedHistory.takeLast(40)
                         )
                     }
-                    _uiState.update {
-                        it.copy(
-                            lastRefreshTime = currentClockString(),
-                            statusLog = "${paneId.shortCode}: Browsing archive ${archivePath.substringAfterLast('/')}"
-                        )
-                    }
                 },
                 onFailure = { err ->
                     val msg = err.message.orEmpty()
                     updatePaneState(paneId) { it.copy(isLoading = false) }
                     if (msg.contains("Encrypted", ignoreCase = true) ||
-                        msg.contains("Password", ignoreCase = true) ||
-                        msg.contains("Wrong Password", ignoreCase = true)
+                        msg.contains("Password", ignoreCase = true)
                     ) {
                         _uiState.update {
                             it.copy(
                                 activeDialog = PlainDialogState.PasswordPrompt(
                                     paneId = paneId,
                                     archivePath = archivePath
-                                ),
-                                statusLog = "Password required for ${archivePath.substringAfterLast('/')}"
+                                )
                             )
                         }
                     } else {
@@ -346,7 +424,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         if (pane.activeArchivePath != null) {
             val inner = pane.activeArchiveInternalDir.trim('/')
             if (inner.isEmpty()) {
-                // Exit virtual archive back to host directory
                 loadPaneDirectory(paneId, pane.currentPath, recordHistory = false)
             } else {
                 val parentInner = inner.substringBeforeLast('/', "")
@@ -361,26 +438,36 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
+        val internalRoot = fileRepo.internalStorageRoot()
         val currentFile = File(pane.currentPath)
         val parent = currentFile.parentFile
-        if (parent != null && parent.exists()) {
+        if (parent != null && parent.exists() && pane.currentPath != internalRoot) {
             loadPaneDirectory(paneId, parent.absolutePath, recordHistory = true)
         }
     }
 
     fun navigateBackOnSystemPress(): Boolean {
-        if (_uiState.value.highlightedEntry != null) {
-            dismissHighlightedDetails()
+        val s = _uiState.value
+        if (s.detailsEntry != null) {
+            dismissDetailsModal()
             return true
         }
-        if (_uiState.value.activeDialog != null) {
+        if (s.activeDialog != null) {
             dismissDialog()
             return true
         }
-        val activeId = _uiState.value.activePaneId
-        val pane = _uiState.value.getPane(activeId)
+        if (s.isSettingsOpen) {
+            closeSettingsScreen()
+            return true
+        }
+        val activeId = s.activePaneId
+        val pane = s.getPane(activeId)
         if (pane.selectedKeys.isNotEmpty()) {
             clearSelection(activeId)
+            return true
+        }
+        if (pane.isSearchVisible || pane.searchQuery.isNotEmpty()) {
+            setPaneSearchVisible(activeId, false)
             return true
         }
         if (pane.activeArchivePath != null) {
@@ -404,16 +491,16 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Single tap handler:
-     * - If pane has active multi-selection, toggles item selection
-     * - If directory (real or virtual), navigates inside
-     * - If archive on disk, opens virtual archive browser
-     * - If text/code file, opens built-in Plain-Text Viewer/Editor
-     * - Otherwise returns false so Activity can launch Android FileProvider intent
+     * Single Tap Handler:
+     * - If multi-select is active in this pane, toggles selection
+     * - If directory, enters directory
+     * - If archive on disk, opens virtual archive browsing
+     * - Otherwise ALWAYS opens the file in its default Android system app!
      */
     fun onSingleTapEntry(
         paneId: PaneId,
         entry: FileEntry,
+        cacheDir: File,
         onLaunchExternalFile: (File) -> Unit
     ) {
         setActivePane(paneId)
@@ -435,23 +522,30 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                     password = pane.activeArchivePassword
                 )
             } else {
-                // Preview virtual file inside archive
+                // Extract virtual file to cache and open in default Android app
                 viewModelScope.launch {
-                    val text = archiveEngine.readVirtualEntryPreview(
+                    _uiState.update {
+                        it.copy(transferProgress = TransferProgress("Opening ${entry.name}...", 1, 1))
+                    }
+                    archiveEngine.extractSingleEntryToCache(
                         archivePath = hostArc,
                         internalPath = internalPath,
+                        cacheDir = cacheDir,
                         password = pane.activeArchivePassword
-                    ) ?: "(Binary file inside archive. Long-press or use [EXTRACT] to unpack.)"
-                    _uiState.update {
-                        it.copy(
-                            activeDialog = PlainDialogState.TextViewerEditor(
-                                paneId = paneId,
-                                entry = entry,
-                                content = text,
-                                isReadOnly = true
-                            )
-                        )
-                    }
+                    ).fold(
+                        onSuccess = { extractedFile ->
+                            _uiState.update { it.copy(transferProgress = null) }
+                            onLaunchExternalFile(extractedFile)
+                        },
+                        onFailure = { err ->
+                            _uiState.update {
+                                it.copy(
+                                    transferProgress = null,
+                                    toastMessage = "Extract error: ${err.message}"
+                                )
+                            }
+                        }
+                    )
                 }
             }
             return
@@ -467,26 +561,23 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        if (FileSystemRepository.isTextViewableExtension(entry.extension, entry.name)) {
-            openTextViewerEditor(paneId, entry)
-            return
-        }
-
+        // Open file in its default Android app
         onLaunchExternalFile(File(entry.path))
     }
 
     /**
-     * Long press handler (requested by user):
-     * Highlights the item and opens the comprehensive ASCII File Details & Options modal.
+     * Double Tap Handler (requested by user):
+     * Shows the detailed File Metadata, Permissions & Cryptographic Hashes Modal.
      */
-    fun onLongPressEntry(paneId: PaneId, entry: FileEntry) {
+    fun onDoubleTapEntry(paneId: PaneId, entry: FileEntry) {
         setActivePane(paneId)
         val pane = _uiState.value.getPane(paneId)
         _uiState.update {
             it.copy(
-                highlightedPaneId = paneId,
-                highlightedEntry = entry,
-                highlightedDetails = null,
+                activeDialog = null,
+                detailsPaneId = paneId,
+                detailsEntry = entry,
+                detailsInfo = null,
                 isLoadingDetails = true
             )
         }
@@ -497,11 +588,8 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 password = pane.activeArchivePassword
             )
             _uiState.update {
-                if (it.highlightedEntry?.uniqueKey == entry.uniqueKey) {
-                    it.copy(
-                        highlightedDetails = detailed,
-                        isLoadingDetails = false
-                    )
+                if (it.detailsEntry?.uniqueKey == entry.uniqueKey) {
+                    it.copy(detailsInfo = detailed, isLoadingDetails = false)
                 } else {
                     it
                 }
@@ -509,76 +597,52 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun dismissHighlightedDetails() {
+    fun dismissDetailsModal() {
         _uiState.update {
             it.copy(
-                highlightedPaneId = null,
-                highlightedEntry = null,
-                highlightedDetails = null,
+                detailsPaneId = null,
+                detailsEntry = null,
+                detailsInfo = null,
                 isLoadingDetails = false
             )
         }
     }
 
-    fun openTextViewerEditor(paneId: PaneId, entry: FileEntry) {
-        viewModelScope.launch {
-            if (entry.isVirtualArchiveEntry && entry.archiveHostPath != null && entry.archiveInternalPath != null) {
-                val content = archiveEngine.readVirtualEntryPreview(
-                    archivePath = entry.archiveHostPath,
-                    internalPath = entry.archiveInternalPath,
-                    password = _uiState.value.getPane(paneId).activeArchivePassword
-                ) ?: ""
-                _uiState.update {
-                    it.copy(
-                        activeDialog = PlainDialogState.TextViewerEditor(
-                            paneId = paneId,
-                            entry = entry,
-                            content = content,
-                            isReadOnly = true
-                        )
-                    )
-                }
-            } else {
-                val res = fileRepo.readFullTextFile(entry.path)
-                res.onSuccess { text ->
-                    val writable = File(entry.path).canWrite()
-                    _uiState.update {
-                        it.copy(
-                            activeDialog = PlainDialogState.TextViewerEditor(
-                                paneId = paneId,
-                                entry = entry,
-                                content = text,
-                                isReadOnly = !writable
-                            )
-                        )
-                    }
-                }.onFailure { err ->
-                    _uiState.update { it.copy(statusLog = "Read failed: ${err.message}") }
-                }
-            }
-        }
-    }
+    /**
+     * Long Press Handler (requested by user):
+     * Opens natural file management operations (Copy, Cut, Paste, Pin, Compress, Extract, Rename, Delete, Multi-select).
+     */
+    fun onLongPressEntry(paneId: PaneId, entry: FileEntry) {
+        setActivePane(paneId)
+        val pane = _uiState.value.getPane(paneId)
+        val currentSelectedKeys = pane.selectedKeys.toMutableSet()
+        currentSelectedKeys.add(entry.uniqueKey)
+        updatePaneState(paneId) { it.copy(selectedKeys = currentSelectedKeys) }
 
-    fun saveEditedTextFile(paneId: PaneId, entry: FileEntry, newContent: String) {
-        viewModelScope.launch {
-            fileRepo.saveTextFile(entry.path, newContent).fold(
-                onSuccess = {
-                    _uiState.update {
-                        it.copy(
-                            activeDialog = null,
-                            statusLog = "Saved ${entry.name} (${newContent.toByteArray().size} B)"
-                        )
-                    }
-                    reloadPane(paneId)
-                },
-                onFailure = { err ->
-                    _uiState.update { it.copy(statusLog = "Save Error: ${err.message}") }
-                }
+        val targetEntries = pane.entries.filter { it.uniqueKey in currentSelectedKeys }
+            .ifEmpty { listOf(entry) }
+
+        _uiState.update {
+            it.copy(
+                activeDialog = PlainDialogState.ItemActionMenu(
+                    paneId = paneId,
+                    entries = targetEntries
+                )
             )
         }
     }
 
-    // Selection & Sorting
+    fun openSelectionActionMenu(paneId: PaneId) {
+        val pane = _uiState.value.getPane(paneId)
+        val selected = pane.entries.filter { it.uniqueKey in pane.selectedKeys }
+        if (selected.isNotEmpty()) {
+            _uiState.update {
+                it.copy(activeDialog = PlainDialogState.ItemActionMenu(paneId, selected))
+            }
+        }
+    }
+
+    // Selection, Search & Sort
     fun toggleSelection(paneId: PaneId, entry: FileEntry) {
         updatePaneState(paneId) { pane ->
             val next = pane.selectedKeys.toMutableSet()
@@ -601,6 +665,17 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         updatePaneState(paneId) { it.copy(selectedKeys = emptySet()) }
     }
 
+    fun setPaneSearchVisible(paneId: PaneId, visible: Boolean) {
+        updatePaneState(paneId) { pane ->
+            val nextQuery = if (!visible) "" else pane.searchQuery
+            pane.copy(
+                isSearchVisible = visible,
+                searchQuery = nextQuery,
+                filteredEntries = filterBySearch(pane.entries, nextQuery)
+            )
+        }
+    }
+
     fun updateSearchQuery(paneId: PaneId, query: String) {
         updatePaneState(paneId) { pane ->
             pane.copy(
@@ -610,41 +685,18 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun updateSortField(paneId: PaneId, field: SortField) {
-        val pane = _uiState.value.getPane(paneId)
-        val currentCfg = pane.sortConfig
-        val nextCfg = if (currentCfg.field == field) {
-            currentCfg.copy(order = currentCfg.order.toggle())
-        } else {
-            currentCfg.copy(field = field)
-        }
-        applySortConfig(paneId, nextCfg)
-    }
-
-    fun toggleFoldersFirst(paneId: PaneId) {
-        val cfg = _uiState.value.getPane(paneId).sortConfig
-        applySortConfig(paneId, cfg.copy(foldersFirst = !cfg.foldersFirst))
-    }
-
-    fun toggleShowHidden(paneId: PaneId) {
-        val cfg = _uiState.value.getPane(paneId).sortConfig
-        val next = cfg.copy(showHidden = !cfg.showHidden)
-        updatePaneState(paneId) { it.copy(sortConfig = next) }
-        reloadPane(paneId)
-    }
-
-    private fun applySortConfig(paneId: PaneId, newConfig: SortConfig) {
+    fun updateSortConfig(paneId: PaneId, field: SortField, order: SortOrder) {
         updatePaneState(paneId) { pane ->
-            val sorted = fileRepo.sortEntries(pane.entries, newConfig)
+            val nextCfg = pane.sortConfig.copy(field = field, order = order)
+            val sorted = fileRepo.sortEntries(pane.entries, nextCfg)
             pane.copy(
-                sortConfig = newConfig,
+                sortConfig = nextCfg,
                 entries = sorted,
                 filteredEntries = filterBySearch(sorted, pane.searchQuery)
             )
         }
     }
 
-    // Dual-Pane Sync & Swap Operations
     fun syncOppositePaneTo(sourcePaneId: PaneId) {
         val sourcePane = _uiState.value.getPane(sourcePaneId)
         val targetPaneId = sourcePaneId.opposite()
@@ -658,7 +710,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         } else {
             loadPaneDirectory(targetPaneId, sourcePane.currentPath)
         }
-        _uiState.update { it.copy(statusLog = "Synced ${targetPaneId.shortCode} to ${sourcePane.displayPathHeader}") }
     }
 
     fun swapPanes() {
@@ -667,13 +718,11 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 paneA = currentB.copy(paneId = PaneId.PANE_A),
-                paneB = currentA.copy(paneId = PaneId.PANE_B),
-                statusLog = "Swapped Pane 1 <-> Pane 2"
+                paneB = currentA.copy(paneId = PaneId.PANE_B)
             )
         }
     }
 
-    // File & Folder Mutations
     fun showDialog(dialog: PlainDialogState) {
         _uiState.update { it.copy(activeDialog = dialog) }
     }
@@ -686,39 +735,29 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         val path = _uiState.value.getPane(paneId).currentPath
         viewModelScope.launch {
             fileRepo.createFolder(path, folderName).fold(
-                onSuccess = { created ->
-                    _uiState.update {
-                        it.copy(
-                            activeDialog = null,
-                            statusLog = "Created folder [${created.name}]"
-                        )
-                    }
+                onSuccess = {
+                    _uiState.update { it.copy(activeDialog = null) }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
-                    _uiState.update { it.copy(statusLog = "Error: ${err.message}") }
+                    _uiState.update { it.copy(toastMessage = "Error: ${err.message}") }
                 }
             )
         }
     }
 
-    fun createNewPlainTextFile(paneId: PaneId, fileName: String, content: String) {
+    fun createNewFile(paneId: PaneId, fileName: String) {
         val path = _uiState.value.getPane(paneId).currentPath
         viewModelScope.launch {
-            fileRepo.createPlainTextFile(path, fileName, content).fold(
-                onSuccess = { created ->
-                    _uiState.update {
-                        it.copy(
-                            activeDialog = null,
-                            statusLog = "Created file [${created.name}]"
-                        )
-                    }
+            fileRepo.createEmptyFile(path, fileName).fold(
+                onSuccess = {
+                    _uiState.update { it.copy(activeDialog = null) }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
-                    _uiState.update { it.copy(statusLog = "Error: ${err.message}") }
+                    _uiState.update { it.copy(toastMessage = "Error: ${err.message}") }
                 }
             )
         }
@@ -727,36 +766,27 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     fun renameFileEntry(paneId: PaneId, entry: FileEntry, newName: String) {
         viewModelScope.launch {
             fileRepo.renameEntry(entry, newName).fold(
-                onSuccess = { renamed ->
-                    _uiState.update {
-                        it.copy(
-                            activeDialog = null,
-                            highlightedEntry = null,
-                            highlightedDetails = null,
-                            statusLog = "Renamed [${entry.name}] -> [${renamed.name}]"
-                        )
-                    }
+                onSuccess = {
+                    _uiState.update { it.copy(activeDialog = null) }
+                    clearSelection(paneId)
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
-                    _uiState.update { it.copy(statusLog = "Rename Error: ${err.message}") }
+                    _uiState.update { it.copy(toastMessage = "Rename Error: ${err.message}") }
                 }
             )
         }
     }
 
-    fun deleteFileEntries(paneId: PaneId, entries: List<FileEntry>) {
+    fun executeBatchRename(paneId: PaneId, entries: List<FileEntry>, prefix: String, startNumber: Int) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeDialog = null) }
-            fileRepo.deleteEntries(entries).fold(
+            fileRepo.batchRenameEntries(entries, prefix, startNumber).fold(
                 onSuccess = { count ->
                     _uiState.update {
                         it.copy(
-                            isBusy = false,
-                            highlightedEntry = null,
-                            highlightedDetails = null,
-                            statusLog = "Deleted $count item(s)"
+                            activeDialog = null,
+                            toastMessage = "Batch renamed $count item(s)"
                         )
                     }
                     clearSelection(paneId)
@@ -764,8 +794,32 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
+                    _uiState.update { it.copy(toastMessage = "Batch Rename Error: ${err.message}") }
+                }
+            )
+        }
+    }
+
+    fun deleteFileEntries(paneId: PaneId, entries: List<FileEntry>) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    activeDialog = null,
+                    transferProgress = TransferProgress("Deleting...", 0, entries.size)
+                )
+            }
+            fileRepo.deleteEntries(entries) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = {
+                    _uiState.update { it.copy(transferProgress = null) }
+                    clearSelection(paneId)
+                    reloadPane(PaneId.PANE_A)
+                    reloadPane(PaneId.PANE_B)
+                },
+                onFailure = { err ->
                     _uiState.update {
-                        it.copy(isBusy = false, statusLog = "Delete Error: ${err.message}")
+                        it.copy(transferProgress = null, toastMessage = "Delete Error: ${err.message}")
                     }
                 }
             )
@@ -777,7 +831,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         val targetPane = _uiState.value.getPane(targetPaneId)
 
         if (entries.any { it.isVirtualArchiveEntry }) {
-            // Virtual archive entries -> extract directly to opposite pane!
             val first = entries.first()
             val hostArc = first.archiveHostPath ?: return
             val selectedPaths = entries.mapNotNull { it.archiveInternalPath }.toSet()
@@ -792,30 +845,28 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
 
         viewModelScope.launch {
-            val opLabel = if (move) "Moved" else "Copied"
             _uiState.update {
                 it.copy(
-                    isBusy = true,
-                    highlightedEntry = null,
-                    highlightedDetails = null,
-                    statusLog = "${if (move) "Moving" else "Copying"} ${entries.size} item(s) -> ${targetPaneId.shortCode}..."
+                    activeDialog = null,
+                    transferProgress = TransferProgress(
+                        "${if (move) "Moving" else "Copying"} to ${targetPaneId.shortCode}...",
+                        0,
+                        entries.size
+                    )
                 )
             }
-            fileRepo.copyOrMoveEntries(entries, targetPane.currentPath, move).fold(
-                onSuccess = { count ->
-                    _uiState.update {
-                        it.copy(
-                            isBusy = false,
-                            statusLog = "$opLabel $count item(s) to ${targetPane.currentPath}"
-                        )
-                    }
+            fileRepo.copyOrMoveEntries(entries, targetPane.currentPath, move) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = {
+                    _uiState.update { it.copy(transferProgress = null) }
                     clearSelection(sourcePaneId)
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
                     _uiState.update {
-                        it.copy(isBusy = false, statusLog = "Transfer Error: ${err.message}")
+                        it.copy(transferProgress = null, toastMessage = "Transfer Error: ${err.message}")
                     }
                 }
             )
@@ -823,58 +874,70 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun stageToClipboard(paneId: PaneId, entries: List<FileEntry>, mode: ClipboardMode) {
+        val realEntries = entries.filter { !it.isVirtualArchiveEntry }
+        if (realEntries.isEmpty()) return
         _uiState.update {
             it.copy(
-                clipboard = ClipboardBuffer(entries = entries, sourcePane = paneId, mode = mode),
-                highlightedEntry = null,
-                highlightedDetails = null,
-                statusLog = "Clipboard: ${entries.size} item(s) staged for ${mode.name}"
+                clipboard = ClipboardBuffer(entries = realEntries, sourcePane = paneId, mode = mode),
+                activeDialog = null
             )
         }
+        clearSelection(paneId)
+    }
+
+    fun clearClipboard() {
+        _uiState.update { it.copy(clipboard = null) }
     }
 
     fun pasteClipboardIntoPane(targetPaneId: PaneId) {
         val clip = _uiState.value.clipboard ?: return
         val destPath = _uiState.value.getPane(targetPaneId).currentPath
+        val isMove = clip.mode == ClipboardMode.MOVE
+
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, statusLog = "Pasting ${clip.entries.size} item(s)...") }
-            val isMove = clip.mode == ClipboardMode.MOVE
-            fileRepo.copyOrMoveEntries(clip.entries, destPath, isMove).fold(
-                onSuccess = { count ->
+            _uiState.update {
+                it.copy(
+                    activeDialog = null,
+                    transferProgress = TransferProgress("Pasting...", 0, clip.entries.size)
+                )
+            }
+            fileRepo.copyOrMoveEntries(clip.entries, destPath, isMove) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = {
                     _uiState.update {
                         it.copy(
-                            isBusy = false,
-                            clipboard = if (isMove) null else it.clipboard,
-                            statusLog = "Pasted $count item(s) into ${targetPaneId.shortCode}"
+                            transferProgress = null,
+                            clipboard = if (isMove) null else it.clipboard
                         )
                     }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
-                    _uiState.update { it.copy(isBusy = false, statusLog = "Paste Error: ${err.message}") }
+                    _uiState.update {
+                        it.copy(transferProgress = null, toastMessage = "Paste Error: ${err.message}")
+                    }
                 }
             )
         }
     }
 
-    // Archive Operations
     fun openCompressDialog(paneId: PaneId, entries: List<FileEntry>) {
-        if (entries.isEmpty()) return
+        val realEntries = entries.filter { !it.isVirtualArchiveEntry }
+        if (realEntries.isEmpty()) return
         val pane = _uiState.value.getPane(paneId)
         val oppositePane = _uiState.value.getPane(paneId.opposite())
-        val defaultName = if (entries.size == 1) {
-            ArchiveEngine.stripArchiveExtensions(entries.first().name)
+        val defaultName = if (realEntries.size == 1) {
+            ArchiveEngine.stripArchiveExtensions(realEntries.first().name)
         } else {
             pane.currentPath.substringAfterLast('/').ifEmpty { "archive" }
         }
         _uiState.update {
             it.copy(
-                highlightedEntry = null,
-                highlightedDetails = null,
                 activeDialog = PlainDialogState.CompressArchive(
                     paneId = paneId,
-                    entries = entries,
+                    entries = realEntries,
                     defaultBaseName = defaultName,
                     currentDirPath = pane.currentPath,
                     oppositeDirPath = oppositePane.currentPath
@@ -892,8 +955,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         val oppositePane = _uiState.value.getPane(paneId.opposite())
         _uiState.update {
             it.copy(
-                highlightedEntry = null,
-                highlightedDetails = null,
                 activeDialog = PlainDialogState.ExtractArchive(
                     paneId = paneId,
                     archivePath = archivePath,
@@ -917,9 +978,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    isBusy = true,
                     activeDialog = null,
-                    statusLog = "Compressing ${entries.size} item(s) -> $archiveBaseName.${format.primaryExtension}..."
+                    transferProgress = TransferProgress(
+                        "Creating $archiveBaseName.${format.primaryExtension}...",
+                        0,
+                        entries.size
+                    )
                 )
             }
             archiveEngine.createArchive(
@@ -928,21 +992,18 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 archiveBaseName = archiveBaseName,
                 format = format,
                 password = password?.takeIf { it.isNotBlank() }
-            ).fold(
-                onSuccess = { outFile ->
-                    _uiState.update {
-                        it.copy(
-                            isBusy = false,
-                            statusLog = "Created archive ${outFile.name} (${FileSystemRepository.formatBytes(outFile.length())})"
-                        )
-                    }
+            ) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = {
+                    _uiState.update { it.copy(transferProgress = null) }
                     clearSelection(paneId)
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
                     _uiState.update {
-                        it.copy(isBusy = false, statusLog = "Compression Error: ${err.message}")
+                        it.copy(transferProgress = null, toastMessage = "Compress Error: ${err.message}")
                     }
                 }
             )
@@ -959,11 +1020,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    isBusy = true,
                     activeDialog = null,
-                    highlightedEntry = null,
-                    highlightedDetails = null,
-                    statusLog = "Extracting ${archivePath.substringAfterLast('/')}..."
+                    transferProgress = TransferProgress(
+                        "Extracting ${archivePath.substringAfterLast('/')}...",
+                        0,
+                        1
+                    )
                 )
             }
             archiveEngine.extractArchive(
@@ -972,37 +1034,18 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 createSubfolder = createSubfolder,
                 password = password?.takeIf { it.isNotBlank() },
                 selectedVirtualPaths = selectedVirtualPaths
-            ).fold(
-                onSuccess = { count ->
-                    _uiState.update {
-                        it.copy(
-                            isBusy = false,
-                            statusLog = "Extracted $count file(s) to $destinationDirPath"
-                        )
-                    }
+            ) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = {
+                    _uiState.update { it.copy(transferProgress = null) }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
                 onFailure = { err ->
                     _uiState.update {
-                        it.copy(isBusy = false, statusLog = "Extraction Error: ${err.message}")
+                        it.copy(transferProgress = null, toastMessage = "Extract Error: ${err.message}")
                     }
-                }
-            )
-        }
-    }
-
-    fun executeTestArchiveIntegrity(archivePath: String, password: String? = null) {
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(isBusy = true, statusLog = "Testing archive integrity: ${archivePath.substringAfterLast('/')}...")
-            }
-            archiveEngine.testArchiveIntegrity(archivePath, password).fold(
-                onSuccess = { report ->
-                    _uiState.update { it.copy(isBusy = false, statusLog = report) }
-                },
-                onFailure = { err ->
-                    _uiState.update { it.copy(isBusy = false, statusLog = "Archive Test Failed: ${err.message}") }
                 }
             )
         }
@@ -1018,8 +1061,11 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             fileRepo.updatePermissions(entry, readable, writable, executable).onSuccess {
                 reloadPane(paneId)
-                onLongPressEntry(paneId, fileRepo.fileToFileEntry(File(entry.path)))
-                _uiState.update { it.copy(statusLog = "Updated permissions for ${entry.name}") }
+                val updatedFile = File(entry.path)
+                onDoubleTapEntry(
+                    paneId,
+                    fileRepo.fileToFileEntry(updatedFile, isPinned = entry.path in _uiState.value.pinnedPaths)
+                )
             }
         }
     }
@@ -1038,9 +1084,5 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 state.copy(paneB = transform(state.paneB))
             }
         }
-    }
-
-    private fun currentClockString(): String {
-        return SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
     }
 }

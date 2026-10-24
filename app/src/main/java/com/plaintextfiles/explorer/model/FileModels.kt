@@ -1,23 +1,43 @@
 package com.plaintextfiles.explorer.model
 
-enum class ThemeMode {
-    DRACULA,
-    ALUCARD
+enum class ThemeMode(val displayName: String) {
+    DRACULA("Dracula (Dark)"),
+    ALUCARD("Alucard (Light)")
 }
 
-/**
- * Supports both requested dual-pane designs plus single-pane focus mode:
- * - SPLIT_VERTICAL: Top & Bottom simultaneous dual panes (ideal for portrait phones)
- * - SPLIT_HORIZONTAL: Left & Right simultaneous dual panes (ideal for landscape/foldables)
- * - SWIPE_PAGER: Horizontal swipeable pager with plain-text scoreboard tabs (`< PANE 1 | PANE 2 >`)
- * - SINGLE_PANE: Full-screen active pane
- */
 enum class DualPaneMode(val shortLabel: String, val description: String) {
-    SPLIT_VERTICAL("SPLIT-V", "Top / Bottom Dual Pane"),
-    SPLIT_HORIZONTAL("SPLIT-H", "Left / Right Dual Pane"),
-    SWIPE_PAGER("PAGER", "Swipeable Tab Dual Pane"),
+    SPLIT_VERTICAL("SPLIT-V", "Top / Bottom Split Pane"),
+    SPLIT_HORIZONTAL("SPLIT-H", "Left / Right Split Pane"),
+    SWIPE_PAGER("PAGER", "Swipeable Pager Tabs"),
     SINGLE_PANE("SINGLE", "Single Pane View")
 }
+
+enum class RowDensity(val label: String, val verticalPaddingDp: Int) {
+    COMPACT("Compact", 2),
+    COZY("Cozy", 4),
+    COMFORTABLE("Comfortable", 7)
+}
+
+enum class FontScalePreset(val label: String, val scaleFactor: Float) {
+    SMALL("Small", 0.90f),
+    NORMAL("Normal", 1.00f),
+    LARGE("Large", 1.12f)
+}
+
+data class AppSettings(
+    val themeMode: ThemeMode = ThemeMode.DRACULA,
+    val dualPaneMode: DualPaneMode = DualPaneMode.SPLIT_VERTICAL,
+    val rowDensity: RowDensity = RowDensity.COMPACT,
+    val fontScale: FontScalePreset = FontScalePreset.NORMAL,
+    val showFileIcons: Boolean = true,
+    val showPermissionSubtitle: Boolean = false,
+    val foldersFirst: Boolean = true,
+    val showHidden: Boolean = false,
+    val globalPinnedAtTop: Boolean = true,
+    val rememberLastPaths: Boolean = true,
+    val enableRowSwipeGesture: Boolean = true,
+    val splitRatio: Float = 0.50f
+)
 
 enum class PaneId(val index: Int, val label: String, val shortCode: String) {
     PANE_A(0, "PANE 1", "P1"),
@@ -29,14 +49,14 @@ enum class PaneId(val index: Int, val label: String, val shortCode: String) {
 enum class SortField(val label: String, val shortTag: String) {
     NAME("Name", "NAME"),
     SIZE("Size", "SIZE"),
-    DATE("Modified", "DATE"),
-    TYPE("Extension", "TYPE"),
+    DATE("Modified Date", "DATE"),
+    TYPE("File Type / Ext", "TYPE"),
     PERMISSIONS("Permissions", "PERM")
 }
 
 enum class SortOrder(val symbol: String, val label: String) {
-    ASCENDING("^", "ASC"),
-    DESCENDING("v", "DESC");
+    ASCENDING("^", "Ascending"),
+    DESCENDING("v", "Descending");
 
     fun toggle(): SortOrder = if (this == ASCENDING) DESCENDING else ASCENDING
 }
@@ -45,7 +65,7 @@ data class SortConfig(
     val field: SortField = SortField.NAME,
     val order: SortOrder = SortOrder.ASCENDING,
     val foldersFirst: Boolean = true,
-    val showHidden: Boolean = true
+    val showHidden: Boolean = false
 )
 
 enum class ArchiveFormat(
@@ -55,7 +75,7 @@ enum class ArchiveFormat(
     val supportsCreation: Boolean,
     val supportsPassword: Boolean
 ) {
-    ZIP("ZIP", "zip", listOf("zip", "jar", "apk", "cbz"), supportsCreation = true, supportsPassword = true),
+    ZIP("ZIP", "zip", listOf("zip", "jar", "cbz"), supportsCreation = true, supportsPassword = true),
     TAR("TAR", "tar", listOf("tar"), supportsCreation = true, supportsPassword = false),
     TAR_GZ("TAR.GZ", "tar.gz", listOf("tar.gz", "tgz"), supportsCreation = true, supportsPassword = false),
     TAR_BZ2("TAR.BZ2", "tar.bz2", listOf("tar.bz2", "tbz2", "tbz"), supportsCreation = true, supportsPassword = false),
@@ -77,19 +97,19 @@ enum class ArchiveFormat(
     }
 }
 
-enum class PlainFileCategory(val asciiBadge: String) {
-    PARENT_DIR("[..]"),
-    DIRECTORY("[DIR]"),
-    SYMLINK("[LNK]"),
-    ARCHIVE("[ARC]"),
-    TEXT_CODE("[TXT]"),
-    AUDIO("[AUD]"),
-    VIDEO("[VID]"),
-    IMAGE("[IMG]"),
-    PACKAGE("[APK]"),
-    DOCUMENT("[DOC]"),
-    EXECUTABLE("[EXE]"),
-    BINARY("[FIL]")
+enum class PlainFileCategory(val asciiBadge: String, val shortCode: String) {
+    PARENT_DIR("[..]", ".."),
+    DIRECTORY("[DIR]", "DIR"),
+    SYMLINK("[LNK]", "LNK"),
+    ARCHIVE("[ARC]", "ARC"),
+    TEXT_CODE("[TXT]", "TXT"),
+    AUDIO("[AUD]", "AUD"),
+    VIDEO("[VID]", "VID"),
+    IMAGE("[IMG]", "IMG"),
+    PACKAGE("[APK]", "APK"),
+    DOCUMENT("[DOC]", "DOC"),
+    EXECUTABLE("[EXE]", "EXE"),
+    BINARY("[FIL]", "FIL")
 }
 
 data class FileEntry(
@@ -111,10 +131,18 @@ data class FileEntry(
     val archiveInternalPath: String? = null,
     val childCount: Int? = null,
     val crc32: Long? = null,
-    val category: PlainFileCategory = PlainFileCategory.BINARY
+    val category: PlainFileCategory = PlainFileCategory.BINARY,
+    val isPinned: Boolean = false,
+    val isPinnedShortcutFromOtherDir: Boolean = false
 ) {
     val uniqueKey: String
-        get() = if (isVirtualArchiveEntry) "${archiveHostPath}::${archiveInternalPath}" else path
+        get() = if (isVirtualArchiveEntry) {
+            "${archiveHostPath}::${archiveInternalPath}"
+        } else if (isPinnedShortcutFromOtherDir) {
+            "PINNED::$path"
+        } else {
+            path
+        }
 }
 
 data class ArchiveSummaryInfo(
@@ -144,21 +172,8 @@ data class FileDetailedInfo(
     val sha1: String?,
     val sha256: String?,
     val crc32Hex: String?,
-    val archiveSummary: ArchiveSummaryInfo?,
-    val textPreview: String?
+    val archiveSummary: ArchiveSummaryInfo?
 )
-
-data class StorageRootInfo(
-    val label: String,
-    val shortTag: String,
-    val path: String,
-    val totalBytes: Long,
-    val freeBytes: Long
-) {
-    val usedBytes: Long get() = (totalBytes - freeBytes).coerceAtLeast(0L)
-    val usedFraction: Float
-        get() = if (totalBytes > 0L) (usedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else 0f
-}
 
 enum class ClipboardMode {
     COPY,
@@ -171,6 +186,15 @@ data class ClipboardBuffer(
     val mode: ClipboardMode
 )
 
+data class TransferProgress(
+    val label: String,
+    val current: Int,
+    val total: Int
+) {
+    val fraction: Float
+        get() = if (total > 0) (current.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0.5f
+}
+
 data class PaneState(
     val paneId: PaneId,
     val currentPath: String,
@@ -182,6 +206,7 @@ data class PaneState(
     val selectedKeys: Set<String> = emptySet(),
     val sortConfig: SortConfig = SortConfig(),
     val searchQuery: String = "",
+    val isSearchVisible: Boolean = false,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val historyBackStack: List<Pair<String, Pair<String?, String>>> = emptyList(),
@@ -190,11 +215,11 @@ data class PaneState(
 ) {
     val isInsideArchive: Boolean get() = activeArchivePath != null
 
-    val displayPathHeader: String
+    val compactTitle: String
         get() = if (activeArchivePath != null) {
             val arcName = activeArchivePath.substringAfterLast('/')
             val inner = if (activeArchiveInternalDir.isBlank()) "/" else "/$activeArchiveInternalDir"
-            "[ARC] $arcName :: $inner"
+            "[ARC] $arcName::$inner"
         } else {
             currentPath
         }

@@ -16,7 +16,6 @@ import com.plaintextfiles.explorer.model.PlainFileCategory
 import com.plaintextfiles.explorer.model.SortConfig
 import com.plaintextfiles.explorer.model.SortField
 import com.plaintextfiles.explorer.model.SortOrder
-import com.plaintextfiles.explorer.model.StorageRootInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -34,116 +33,97 @@ class FileSystemRepository(private val context: Context) {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
         } else {
-            val readGranted = ContextCompat.checkSelfPermission(
+            ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.READ_EXTERNAL_STORAGE
             ) == PackageManager.PERMISSION_GRANTED
-            readGranted
         }
     }
 
-    fun defaultStartDirectory(): String {
+    /**
+     * Internal device storage root (/storage/emulated/0).
+     * Strictly uses internal storage as requested.
+     */
+    fun internalStorageRoot(): String {
         val primary = Environment.getExternalStorageDirectory()
-        return if (primary.exists() && primary.canRead()) {
+        return if (primary.exists()) {
             primary.absolutePath
         } else {
             context.filesDir.absolutePath
         }
     }
 
-    fun discoverStorageRoots(): List<StorageRootInfo> {
-        val roots = mutableListOf<StorageRootInfo>()
-        val seenPaths = mutableSetOf<String>()
-
-        fun addRootIfValid(label: String, shortTag: String, dir: File?) {
-            if (dir == null || !dir.exists()) return
-            val canonicalOrAbs = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
-            if (!seenPaths.add(canonicalOrAbs)) return
-            val (total, free) = queryStatFs(dir)
-            roots.add(
-                StorageRootInfo(
-                    label = label,
-                    shortTag = shortTag,
-                    path = dir.absolutePath,
-                    totalBytes = total,
-                    freeBytes = free
-                )
-            )
-        }
-
-        val primaryExt = Environment.getExternalStorageDirectory()
-        addRootIfValid("Internal Shared", "INTERNAL", primaryExt)
-        addRootIfValid(
-            "Downloads",
-            "DOWNLOAD",
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        )
-        addRootIfValid(
-            "Documents",
-            "DOCS",
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        )
-        addRootIfValid(
-            "DCIM / Media",
-            "DCIM",
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
-        )
-
-        // Check removable SD / USB OTG volumes
-        val externalDirs = context.getExternalFilesDirs(null)
-        externalDirs.forEachIndexed { idx, appExtDir ->
-            if (appExtDir != null && idx > 0) {
-                // Walk up from /storage/XXXX-XXXX/Android/data/... to /storage/XXXX-XXXX
-                var cursor: File? = appExtDir
-                repeat(4) { cursor = cursor?.parentFile }
-                if (cursor != null && cursor!!.exists()) {
-                    addRootIfValid("External Volume $idx", "EXT-$idx", cursor)
-                }
-            }
-        }
-
-        addRootIfValid("App Sandbox", "SANDBOX", context.filesDir)
-        addRootIfValid("System Root /", "ROOT /", File("/"))
-
-        return roots
-    }
-
     fun queryStatFs(dir: File): Pair<Long, Long> {
         return runCatching {
-            val stat = StatFs(dir.absolutePath)
+            val target = if (dir.exists()) dir else Environment.getExternalStorageDirectory()
+            val stat = StatFs(target.absolutePath)
             Pair(stat.totalBytes, stat.availableBytes)
         }.getOrDefault(Pair(0L, 0L))
     }
 
     suspend fun listDirectory(
         dirPath: String,
-        sortConfig: SortConfig
+        sortConfig: SortConfig,
+        pinnedPaths: Set<String>,
+        globalPinnedAtTop: Boolean
     ): Result<List<FileEntry>> = withContext(Dispatchers.IO) {
         runCatching {
             val dir = File(dirPath)
             if (!dir.exists()) {
-                throw IllegalArgumentException("Path does not exist: $dirPath")
+                throw IllegalArgumentException("Folder does not exist: $dirPath")
             }
             if (!dir.isDirectory) {
-                throw IllegalArgumentException("Not a directory: $dirPath")
+                throw IllegalArgumentException("Not a folder: $dirPath")
             }
 
             val rawChildren = dir.listFiles()
-                ?: throw IllegalStateException("ACCESS DENIED: Grant All Files Access or check directory permissions.")
+                ?: throw IllegalStateException("ACCESS DENIED: Grant storage permission in system settings.")
 
-            val mapped = rawChildren.mapNotNull { file ->
+            val localEntries = rawChildren.mapNotNull { file ->
                 if (!sortConfig.showHidden && file.name.startsWith(".")) {
                     null
                 } else {
-                    fileToFileEntry(file)
+                    fileToFileEntry(
+                        file = file,
+                        isPinned = file.absolutePath in pinnedPaths,
+                        isPinnedShortcutFromOtherDir = false
+                    )
                 }
             }
 
-            sortEntries(mapped, sortConfig)
+            val localPathsSet = localEntries.map { it.path }.toSet()
+
+            // If globalPinnedAtTop is enabled, include pinned items from other internal directories at the very top
+            val externalPinnedEntries = if (globalPinnedAtTop) {
+                pinnedPaths.mapNotNull { pinnedPath ->
+                    if (pinnedPath in localPathsSet || pinnedPath == dir.absolutePath) {
+                        null
+                    } else {
+                        val pf = File(pinnedPath)
+                        if (pf.exists()) {
+                            fileToFileEntry(
+                                file = pf,
+                                isPinned = true,
+                                isPinnedShortcutFromOtherDir = true
+                            )
+                        } else {
+                            null
+                        }
+                    }
+                }
+            } else {
+                emptyList()
+            }
+
+            sortEntries(externalPinnedEntries + localEntries, sortConfig)
         }
     }
 
-    fun fileToFileEntry(file: File): FileEntry {
+    fun fileToFileEntry(
+        file: File,
+        isPinned: Boolean = false,
+        isPinnedShortcutFromOtherDir: Boolean = false
+    ): FileEntry {
         val isSymlink = runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
         val isDir = file.isDirectory
         val name = file.name.ifEmpty { "/" }
@@ -176,12 +156,27 @@ class FileSystemRepository(private val context: Context) {
             archiveInternalPath = null,
             childCount = childCount,
             crc32 = null,
-            category = classifyFileCategory(name, ext, isDir, isSymlink, isArc, file.canExecute())
+            category = classifyFileCategory(name, ext, isDir, isSymlink, isArc, file.canExecute()),
+            isPinned = isPinned,
+            isPinnedShortcutFromOtherDir = isPinnedShortcutFromOtherDir
         )
     }
 
+    /**
+     * Pinned items are ALWAYS sorted to the top of the main list, followed by folders (if foldersFirst),
+     * then sorted by the user's selected SortField and SortOrder.
+     */
     fun sortEntries(entries: List<FileEntry>, config: SortConfig): List<FileEntry> {
         val comparator = Comparator<FileEntry> { a, b ->
+            // 1. Pinned items ALWAYS come first at the top of the main list
+            if (a.isPinned != b.isPinned) {
+                return@Comparator if (a.isPinned) -1 else 1
+            }
+            // Local pinned items in this directory before global pinned shortcuts (or both at top)
+            if (a.isPinned && b.isPinned && a.isPinnedShortcutFromOtherDir != b.isPinnedShortcutFromOtherDir) {
+                return@Comparator if (!a.isPinnedShortcutFromOtherDir) -1 else 1
+            }
+            // 2. Folders first (when enabled)
             if (config.foldersFirst && a.isDirectory != b.isDirectory) {
                 return@Comparator if (a.isDirectory) -1 else 1
             }
@@ -212,22 +207,13 @@ class FileSystemRepository(private val context: Context) {
         password: String? = null
     ): FileDetailedInfo = withContext(Dispatchers.IO) {
         if (entry.isVirtualArchiveEntry && entry.archiveHostPath != null && entry.archiveInternalPath != null) {
-            val preview = if (!entry.isDirectory && isTextViewableExtension(entry.extension, entry.name)) {
-                archiveEngine.readVirtualEntryPreview(
-                    archivePath = entry.archiveHostPath,
-                    internalPath = entry.archiveInternalPath,
-                    password = password
-                )
-            } else {
-                null
-            }
             val crcHex = entry.crc32?.let { String.format(Locale.US, "%08X", it) }
             return@withContext FileDetailedInfo(
                 entry = entry,
                 mimeType = resolveMimeType(entry.name, entry.isDirectory),
                 readablePermissions = entry.permissions,
                 octalPermissions = entry.octalPermissions,
-                ownerReadableWritableExecutable = "VIRTUAL ARCHIVE ENTRY (READ-ONLY)",
+                ownerReadableWritableExecutable = "VIRTUAL ARCHIVE ENTRY",
                 exactBytes = entry.size,
                 formattedSize = formatBytes(entry.size) + (entry.compressedSize?.let { " (Packed: ${formatBytes(it)})" } ?: ""),
                 recursiveFileCount = null,
@@ -237,8 +223,7 @@ class FileSystemRepository(private val context: Context) {
                 sha1 = null,
                 sha256 = null,
                 crc32Hex = crcHex,
-                archiveSummary = null,
-                textPreview = preview
+                archiveSummary = null
             )
         }
 
@@ -277,7 +262,6 @@ class FileSystemRepository(private val context: Context) {
         var sha256Hex: String? = null
         var crc32Hex: String? = null
 
-        // Compute MD5, SHA-1, SHA-256, and CRC32 for files up to 512 MB
         if (file.isFile && file.canRead() && totalBytes <= 512L * 1024L * 1024L) {
             runCatching {
                 val md5Digest = MessageDigest.getInstance("MD5")
@@ -308,17 +292,12 @@ class FileSystemRepository(private val context: Context) {
             null
         }
 
-        val textPreview = if (file.isFile && file.canRead() && isTextViewableExtension(entry.extension, entry.name)) {
-            readTextPreview(file, maxChars = 2400)
-        } else {
-            null
-        }
-
         val flags = buildList {
-            if (file.canRead()) add("READABLE") else add("NO-READ")
-            if (file.canWrite()) add("WRITABLE") else add("READ-ONLY")
-            if (file.canExecute()) add("EXECUTABLE")
+            if (file.canRead()) add("READ") else add("NO-READ")
+            if (file.canWrite()) add("WRITE") else add("READ-ONLY")
+            if (file.canExecute()) add("EXEC")
             if (file.isHidden) add("HIDDEN")
+            if (entry.isPinned) add("PINNED")
         }.joinToString(" | ")
 
         FileDetailedInfo(
@@ -335,9 +314,8 @@ class FileSystemRepository(private val context: Context) {
             md5 = md5Hex,
             sha1 = sha1Hex,
             sha256 = sha256Hex,
-            crc32Hex = crc32Hex,
-            archiveSummary = archiveSummary,
-            textPreview = textPreview
+            crc32Hex = crcHex,
+            archiveSummary = archiveSummary
         )
     }
 
@@ -352,37 +330,14 @@ class FileSystemRepository(private val context: Context) {
         }
     }
 
-    suspend fun createPlainTextFile(
-        parentPath: String,
-        name: String,
-        initialContent: String
-    ): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun createEmptyFile(parentPath: String, name: String): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             val clean = name.trim()
             require(clean.isNotEmpty() && !clean.contains("/")) { "Invalid file name." }
             val target = File(parentPath, clean)
             if (target.exists()) throw IllegalStateException("File '${clean}' already exists.")
-            target.writeText(initialContent, Charsets.UTF_8)
+            target.writeText("", Charsets.UTF_8)
             target
-        }
-    }
-
-    suspend fun saveTextFile(filePath: String, content: String): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            File(filePath).writeText(content, Charsets.UTF_8)
-        }
-    }
-
-    suspend fun readFullTextFile(filePath: String, maxBytes: Int = 512 * 1024): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
-            val file = File(filePath)
-            val bytes = FileInputStream(file).use { fis ->
-                val len = file.length().coerceAtMost(maxBytes.toLong()).toInt()
-                val buf = ByteArray(len)
-                val read = fis.read(buf)
-                if (read > 0) buf.copyOf(read) else ByteArray(0)
-            }
-            String(bytes, Charsets.UTF_8)
         }
     }
 
@@ -398,10 +353,42 @@ class FileSystemRepository(private val context: Context) {
         }
     }
 
-    suspend fun deleteEntries(entries: List<FileEntry>): Result<Int> = withContext(Dispatchers.IO) {
+    /**
+     * Batch rename selected items using a base prefix, optional numbering (01, 02...), and preserving extensions.
+     */
+    suspend fun batchRenameEntries(
+        entries: List<FileEntry>,
+        prefix: String,
+        startNumber: Int = 1
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanPrefix = prefix.trim().ifEmpty { "item_" }
+            var renamedCount = 0
+            entries.forEachIndexed { idx, item ->
+                val src = File(item.path)
+                if (src.exists()) {
+                    val numStr = String.format(Locale.US, "%02d", startNumber + idx)
+                    val extPart = if (!src.isDirectory && src.extension.isNotEmpty()) ".${src.extension}" else ""
+                    val newName = "$cleanPrefix$numStr$extPart"
+                    val dest = File(src.parentFile, newName)
+                    if (!dest.exists() && src.renameTo(dest)) {
+                        renamedCount++
+                    }
+                }
+            }
+            renamedCount
+        }
+    }
+
+    suspend fun deleteEntries(
+        entries: List<FileEntry>,
+        onProgress: ((Int, Int, String) -> Unit)? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             var count = 0
-            for (item in entries) {
+            val total = entries.size
+            entries.forEachIndexed { idx, item ->
+                onProgress?.invoke(idx + 1, total, "Deleting ${item.name}")
                 val f = File(item.path)
                 if (f.exists() && f.deleteRecursively()) {
                     count++
@@ -414,7 +401,8 @@ class FileSystemRepository(private val context: Context) {
     suspend fun copyOrMoveEntries(
         entries: List<FileEntry>,
         destinationDirPath: String,
-        move: Boolean
+        move: Boolean,
+        onProgress: ((Int, Int, String) -> Unit)? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             val destDir = File(destinationDirPath)
@@ -422,26 +410,36 @@ class FileSystemRepository(private val context: Context) {
             require(destDir.isDirectory) { "Destination is not a directory: $destinationDirPath" }
 
             var processed = 0
-            for (entry in entries) {
+            val total = entries.size
+            entries.forEachIndexed { idx, entry ->
                 val src = File(entry.path)
-                if (!src.exists()) continue
-                var dest = File(destDir, src.name)
-                if (src.canonicalPath == dest.canonicalPath) {
-                    if (move) continue
-                    val base = src.nameWithoutExtension
-                    val ext = src.extension.let { if (it.isEmpty()) "" else ".$it" }
-                    dest = File(destDir, "${base}_copy$ext")
-                }
-
-                if (move) {
-                    if (!src.renameTo(dest)) {
-                        src.copyRecursively(dest, overwrite = true)
-                        src.deleteRecursively()
+                if (src.exists()) {
+                    onProgress?.invoke(
+                        idx + 1,
+                        total,
+                        "${if (move) "Moving" else "Copying"} ${src.name}"
+                    )
+                    var dest = File(destDir, src.name)
+                    if (src.canonicalPath == dest.canonicalPath) {
+                        if (!move) {
+                            val base = src.nameWithoutExtension
+                            val ext = src.extension.let { if (it.isEmpty()) "" else ".$it" }
+                            dest = File(destDir, "${base}_copy$ext")
+                            src.copyRecursively(dest, overwrite = true)
+                            processed++
+                        }
+                    } else {
+                        if (move) {
+                            if (!src.renameTo(dest)) {
+                                src.copyRecursively(dest, overwrite = true)
+                                src.deleteRecursively()
+                            }
+                        } else {
+                            src.copyRecursively(dest, overwrite = true)
+                        }
+                        processed++
                     }
-                } else {
-                    src.copyRecursively(dest, overwrite = true)
                 }
-                processed++
             }
             processed
         }
@@ -460,21 +458,6 @@ class FileSystemRepository(private val context: Context) {
             f.setExecutable(executable, false)
             Unit
         }
-    }
-
-    private fun readTextPreview(file: File, maxChars: Int): String? {
-        return runCatching {
-            val buffer = ByteArray(maxChars.coerceAtMost(4096))
-            val read = FileInputStream(file).use { it.read(buffer) }
-            if (read <= 0) return@runCatching "(Empty File)"
-            val slice = buffer.copyOf(read)
-            // Check if binary (contains null bytes)
-            if (slice.any { it == 0.toByte() }) return@runCatching null
-            String(slice, Charsets.UTF_8)
-                .lineSequence()
-                .take(30)
-                .joinToString("\n")
-        }.getOrNull()
     }
 
     companion object {
@@ -523,11 +506,11 @@ class FileSystemRepository(private val context: Context) {
                 isDir -> PlainFileCategory.DIRECTORY
                 ext == "apk" || ext == "aab" -> PlainFileCategory.PACKAGE
                 isArchive -> PlainFileCategory.ARCHIVE
-                isTextViewableExtension(ext, name) -> PlainFileCategory.TEXT_CODE
                 ext in AUDIO_EXTENSIONS -> PlainFileCategory.AUDIO
                 ext in VIDEO_EXTENSIONS -> PlainFileCategory.VIDEO
                 ext in IMAGE_EXTENSIONS -> PlainFileCategory.IMAGE
                 ext in DOC_EXTENSIONS -> PlainFileCategory.DOCUMENT
+                isTextViewableExtension(ext, name) -> PlainFileCategory.TEXT_CODE
                 isExecutable -> PlainFileCategory.EXECUTABLE
                 else -> PlainFileCategory.BINARY
             }
@@ -558,7 +541,7 @@ class FileSystemRepository(private val context: Context) {
             val kb = bytes / 1024.0
             if (kb < 1024.0) return String.format(Locale.US, "%.1f KB", kb)
             val mb = kb / 1024.0
-            if (mb < 1024.0) return String.format(Locale.US, "%.2f MB", mb)
+            if (mb < 1024.0) return String.format(Locale.US, "%.1f MB", mb)
             val gb = mb / 1024.0
             return String.format(Locale.US, "%.2f GB", gb)
         }
@@ -578,9 +561,9 @@ class FileSystemRepository(private val context: Context) {
         fun resolveMimeType(fileName: String, isDirectory: Boolean): String {
             if (isDirectory) return "inode/directory"
             val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-            if (ext.isEmpty()) return "application/octet-stream"
+            if (ext.isEmpty()) return "*/*"
             return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-                ?: if (isTextViewableExtension(ext, fileName)) "text/plain" else "application/octet-stream"
+                ?: if (isTextViewableExtension(ext, fileName)) "text/plain" else "*/*"
         }
     }
 }

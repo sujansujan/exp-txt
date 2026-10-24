@@ -3,7 +3,6 @@ package com.plaintextfiles.explorer.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,10 +10,8 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -27,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -43,6 +41,8 @@ import com.plaintextfiles.explorer.model.ClipboardMode
 import com.plaintextfiles.explorer.model.FileDetailedInfo
 import com.plaintextfiles.explorer.model.FileEntry
 import com.plaintextfiles.explorer.model.PaneId
+import com.plaintextfiles.explorer.model.SortField
+import com.plaintextfiles.explorer.model.SortOrder
 import com.plaintextfiles.explorer.ui.ExplorerViewModel
 import com.plaintextfiles.explorer.ui.PlainDialogState
 import com.plaintextfiles.explorer.ui.components.AsciiDivider
@@ -50,305 +50,114 @@ import com.plaintextfiles.explorer.ui.components.AsciiFramedSection
 import com.plaintextfiles.explorer.ui.components.PlainTextActionLink
 import com.plaintextfiles.explorer.ui.theme.LocalPlainTextPalette
 import java.io.File
+import java.util.Locale
 
 /**
- * Long-Press ASCII File Details & Action Modal.
- * Mirrors https://plaintextsports.com/ ASCII box aesthetic (`+---+`, `|`, monospace key-value table)
- * and provides all file/folder/archive operations in plain text.
+ * Double-Tap File Details & Checksums Modal.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun LongPressFileDetailsModal(
+fun DoubleTapFileDetailsModal(
     paneId: PaneId,
     entry: FileEntry,
     details: FileDetailedInfo?,
     isLoading: Boolean,
-    viewModel: ExplorerViewModel,
-    onOpenExternal: (File) -> Unit,
-    onShareExternal: (File) -> Unit
+    viewModel: ExplorerViewModel
 ) {
     val palette = LocalPlainTextPalette.current
     val clipboardManager = LocalClipboardManager.current
-    val oppositePaneLabel = paneId.opposite().shortCode
 
     Dialog(
-        onDismissRequest = { viewModel.dismissHighlightedDetails() },
+        onDismissRequest = { viewModel.dismissDetailsModal() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.95f)
+                .fillMaxWidth(0.94f)
                 .background(palette.background)
-                .border(2.dp, palette.purple)
-                .padding(8.dp)
+                .border(1.5.dp, palette.purple)
+                .padding(10.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
-                // Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "+-- [HIGHLIGHTED ITEM DETAILS & OPTIONS] --+",
+                        text = "+-- [FILE DETAILS] --+",
                         color = palette.purple,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
                     )
                     PlainTextActionLink(
-                        label = "X CLOSE",
+                        label = "CLOSE",
                         accentColor = palette.red,
-                        onClick = { viewModel.dismissHighlightedDetails() }
+                        onClick = { viewModel.dismissDetailsModal() }
                     )
                 }
 
                 AsciiDivider(char = '=', color = palette.purple)
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                // Title & Badge
                 Text(
-                    text = "${entry.category.asciiBadge} ${entry.name}",
-                    color = when {
-                        entry.isDirectory -> palette.cyan
-                        entry.isArchive -> palette.orange
-                        else -> palette.green
-                    },
+                    text = "${if (entry.isPinned) "[★ PIN] " else ""}${entry.category.asciiBadge} ${entry.name}",
+                    color = if (entry.isDirectory) palette.cyan else palette.green,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
+                    fontSize = 13.sp
                 )
                 Text(
                     text = entry.path,
                     color = palette.comment,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp
+                    fontSize = 10.5.sp
                 )
 
                 Spacer(modifier = Modifier.height(6.dp))
-                AsciiDivider(char = '-', color = palette.comment)
+                AsciiDivider()
                 Spacer(modifier = Modifier.height(6.dp))
-
-                // Quick Actions Section
-                Text(
-                    text = "ACTIONS (${paneId.label} -> $oppositePaneLabel):",
-                    color = palette.yellow,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (entry.isDirectory) {
-                        PlainTextActionLink(
-                            label = "OPEN DIR",
-                            accentColor = palette.cyan,
-                            onClick = {
-                                viewModel.dismissHighlightedDetails()
-                                viewModel.onSingleTapEntry(paneId, entry, onOpenExternal)
-                            }
-                        )
-                    } else if (entry.isArchive && !entry.isVirtualArchiveEntry) {
-                        PlainTextActionLink(
-                            label = "BROWSE ARCHIVE",
-                            accentColor = palette.orange,
-                            onClick = {
-                                viewModel.dismissHighlightedDetails()
-                                viewModel.loadVirtualArchive(paneId, entry.path)
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "EXTRACT...",
-                            accentColor = palette.green,
-                            onClick = {
-                                viewModel.openExtractDialog(paneId, entry.path)
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "EXTRACT -> $oppositePaneLabel",
-                            accentColor = palette.cyan,
-                            onClick = {
-                                val dest = viewModel.uiState.value.getPane(paneId.opposite()).currentPath
-                                viewModel.executeExtractArchive(
-                                    archivePath = entry.path,
-                                    destinationDirPath = dest,
-                                    createSubfolder = true
-                                )
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "TEST ARCHIVE",
-                            accentColor = palette.yellow,
-                            onClick = {
-                                viewModel.dismissHighlightedDetails()
-                                viewModel.executeTestArchiveIntegrity(entry.path)
-                            }
-                        )
-                    } else {
-                        PlainTextActionLink(
-                            label = "VIEW AS TEXT",
-                            accentColor = palette.green,
-                            onClick = {
-                                viewModel.dismissHighlightedDetails()
-                                viewModel.openTextViewerEditor(paneId, entry)
-                            }
-                        )
-                        if (!entry.isVirtualArchiveEntry) {
-                            PlainTextActionLink(
-                                label = "OPEN EXTERNAL",
-                                accentColor = palette.cyan,
-                                onClick = {
-                                    viewModel.dismissHighlightedDetails()
-                                    onOpenExternal(File(entry.path))
-                                }
-                            )
-                            PlainTextActionLink(
-                                label = "SHARE",
-                                accentColor = palette.purple,
-                                onClick = {
-                                    viewModel.dismissHighlightedDetails()
-                                    onShareExternal(File(entry.path))
-                                }
-                            )
-                        }
-                    }
-
-                    PlainTextActionLink(
-                        label = if (entry.isVirtualArchiveEntry) "EXTRACT -> $oppositePaneLabel" else "COPY -> $oppositePaneLabel",
-                        accentColor = palette.cyan,
-                        onClick = {
-                            viewModel.copyOrMoveToOppositePane(paneId, listOf(entry), move = false)
-                        }
-                    )
-
-                    if (!entry.isVirtualArchiveEntry) {
-                        PlainTextActionLink(
-                            label = "MOVE -> $oppositePaneLabel",
-                            accentColor = palette.orange,
-                            onClick = {
-                                viewModel.copyOrMoveToOppositePane(paneId, listOf(entry), move = true)
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "COMPRESS...",
-                            accentColor = palette.pink,
-                            onClick = {
-                                viewModel.openCompressDialog(paneId, listOf(entry))
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "RENAME",
-                            accentColor = palette.yellow,
-                            onClick = {
-                                viewModel.dismissHighlightedDetails()
-                                viewModel.showDialog(PlainDialogState.RenameEntry(paneId, entry))
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "STAGE COPY",
-                            accentColor = palette.cyan,
-                            onClick = {
-                                viewModel.stageToClipboard(paneId, listOf(entry), ClipboardMode.COPY)
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "STAGE CUT",
-                            accentColor = palette.orange,
-                            onClick = {
-                                viewModel.stageToClipboard(paneId, listOf(entry), ClipboardMode.MOVE)
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "SELECT ITEM",
-                            accentColor = palette.purple,
-                            onClick = {
-                                viewModel.toggleSelection(paneId, entry)
-                                viewModel.dismissHighlightedDetails()
-                            }
-                        )
-                        PlainTextActionLink(
-                            label = "DELETE",
-                            accentColor = palette.red,
-                            onClick = {
-                                viewModel.dismissHighlightedDetails()
-                                viewModel.showDialog(PlainDialogState.DeleteConfirm(paneId, listOf(entry)))
-                            }
-                        )
-                    } else if (entry.archiveHostPath != null && entry.archiveInternalPath != null) {
-                        PlainTextActionLink(
-                            label = "EXTRACT THIS ENTRY...",
-                            accentColor = palette.green,
-                            onClick = {
-                                viewModel.openExtractDialog(
-                                    paneId = paneId,
-                                    archivePath = entry.archiveHostPath,
-                                    selectedVirtualPaths = setOf(entry.archiveInternalPath)
-                                )
-                            }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                AsciiDivider(char = '-', color = palette.comment)
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Detailed Properties Table
-                Text(
-                    text = "+-- [FILE METADATA & CHECKSUMS] --+",
-                    color = palette.cyan,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
-                Spacer(modifier = Modifier.height(4.dp))
 
                 if (isLoading && details == null) {
                     Text(
-                        text = "| Computing recursive size, permissions, and hashes (MD5 / SHA-256)...",
+                        text = "| Computing size, permissions & SHA-256 / MD5 checksums...",
                         color = palette.yellow,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp
                     )
                 } else if (details != null) {
                     AsciiMetadataRow("TYPE", if (entry.isDirectory) "DIRECTORY" else if (entry.isArchive) "ARCHIVE (${entry.archiveFormat?.displayName})" else "FILE")
-                    AsciiMetadataRow("MIME TYPE", details.mimeType)
+                    AsciiMetadataRow("MIME", details.mimeType)
                     AsciiMetadataRow("SIZE", details.formattedSize)
                     if (details.recursiveFileCount != null && details.recursiveFolderCount != null) {
                         AsciiMetadataRow(
-                            "CONTENTS",
-                            "${details.recursiveFileCount} files, ${details.recursiveFolderCount} sub-folders"
+                            "CONTAINS",
+                            "${details.recursiveFileCount} files, ${details.recursiveFolderCount} folders"
                         )
                     }
                     AsciiMetadataRow("MODIFIED", FileSystemRepository.formatTimestamp(entry.lastModified))
-                    AsciiMetadataRow("PERMISSIONS", "${details.readablePermissions} (${details.octalPermissions})")
-                    AsciiMetadataRow("ACCESS FLAGS", details.ownerReadableWritableExecutable)
+                    AsciiMetadataRow("MODE", "${details.readablePermissions} (${details.octalPermissions})")
+                    AsciiMetadataRow("FLAGS", details.ownerReadableWritableExecutable)
 
                     details.symlinkTarget?.let { target ->
-                        AsciiMetadataRow("SYMLINK ->", target)
+                        AsciiMetadataRow("TARGET ->", target)
                     }
 
-                    // Interactive permission bit toggles for local files
                     if (!entry.isVirtualArchiveEntry) {
                         val f = File(entry.path)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 3.dp),
+                                .padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "| CHMOD TOGGLE:",
+                                text = "| CHMOD:",
                                 color = palette.comment,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp
@@ -377,27 +186,24 @@ fun LongPressFileDetailsModal(
                         }
                     }
 
-                    // Archive Inspector Section
                     details.archiveSummary?.let { arc ->
                         Spacer(modifier = Modifier.height(6.dp))
                         AsciiFramedSection(
-                            title = "ARCHIVE STRUCTURE (${arc.formatName})",
+                            title = "ARCHIVE INFO (${arc.formatName})",
                             rightHeaderText = "RATIO: ${arc.compressionRatioPercent}%",
                             titleColor = palette.orange
                         ) {
-                            AsciiMetadataRow("TOTAL ENTRIES", "${arc.totalEntries} (${arc.totalFiles} files, ${arc.totalDirectories} dirs)")
-                            AsciiMetadataRow("UNCOMPRESSED", FileSystemRepository.formatBytes(arc.totalUncompressedBytes))
-                            AsciiMetadataRow("COMPRESSED", FileSystemRepository.formatBytes(arc.totalCompressedBytes))
-                            AsciiMetadataRow("ENCRYPTED", if (arc.isEncrypted) "YES (Password Protected)" else "NO")
+                            AsciiMetadataRow("ENTRIES", "${arc.totalEntries} (${arc.totalFiles} files, ${arc.totalDirectories} dirs)")
+                            AsciiMetadataRow("UNPACKED", FileSystemRepository.formatBytes(arc.totalUncompressedBytes))
+                            AsciiMetadataRow("PACKED", FileSystemRepository.formatBytes(arc.totalCompressedBytes))
+                            AsciiMetadataRow("ENCRYPTED", if (arc.isEncrypted) "YES" else "NO")
                         }
                     }
 
-                    // Hashes Section
                     if (details.crc32Hex != null || details.md5 != null || details.sha256 != null) {
                         Spacer(modifier = Modifier.height(6.dp))
                         AsciiFramedSection(
-                            title = "CRYPTOGRAPHIC CHECKSUMS",
-                            rightHeaderText = "[TAP HASH TO COPY]",
+                            title = "CHECKSUMS (TAP TO COPY)",
                             titleColor = palette.green
                         ) {
                             details.crc32Hex?.let { crc ->
@@ -423,42 +229,21 @@ fun LongPressFileDetailsModal(
                         }
                     }
 
-                    // Copy Path Button
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         PlainTextActionLink(
-                            label = "COPY FULL PATH",
+                            label = "COPY PATH",
                             accentColor = palette.cyan,
                             onClick = { clipboardManager.setText(AnnotatedString(entry.path)) }
                         )
-                        details.sha256?.let { sha ->
-                            PlainTextActionLink(
-                                label = "COPY SHA-256",
-                                accentColor = palette.green,
-                                onClick = { clipboardManager.setText(AnnotatedString(sha)) }
-                            )
-                        }
-                    }
-
-                    // Inline Plain-Text Preview if available
-                    details.textPreview?.let { preview ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        AsciiFramedSection(
-                            title = "PLAIN-TEXT HEAD PREVIEW",
-                            rightHeaderText = "UTF-8",
-                            titleColor = palette.yellow
-                        ) {
-                            Text(
-                                text = preview,
-                                color = palette.foreground,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                lineHeight = 14.sp,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState())
-                            )
-                        }
+                        PlainTextActionLink(
+                            label = "ACTIONS...",
+                            accentColor = palette.yellow,
+                            onClick = {
+                                viewModel.dismissDetailsModal()
+                                viewModel.onLongPressEntry(paneId, entry)
+                            }
+                        )
                     }
                 }
             }
@@ -477,15 +262,15 @@ private fun AsciiMetadataRow(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(vertical = 1.dp)
+            .padding(vertical = 1.5.dp)
     } else {
         Modifier
             .fillMaxWidth()
-            .padding(vertical = 1.dp)
+            .padding(vertical = 1.5.dp)
     }
     Row(modifier = rowMod) {
         Text(
-            text = "| " + key.padEnd(13, ' ') + ": ",
+            text = "| " + key.padEnd(10, ' ') + ": ",
             color = palette.comment,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
@@ -500,9 +285,6 @@ private fun AsciiMetadataRow(
     }
 }
 
-/**
- * Plain-Text Input Field styled with ASCII brackets `[ input ]`
- */
 @Composable
 fun AsciiTextField(
     value: String,
@@ -545,13 +327,16 @@ fun AsciiTextField(
 }
 
 /**
- * Dispatcher for all Plain-Text Dialogs (Create Folder, Create File, Rename, Delete, Compress, Extract, Password, Text Editor)
+ * Host for Long-Press File Operations Sheet, Sort Modal, Batch Rename, Compress, Extract, etc.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ActivePlainDialogHost(
     dialogState: PlainDialogState,
-    viewModel: ExplorerViewModel
+    hasClipboard: Boolean,
+    viewModel: ExplorerViewModel,
+    onOpenExternal: (File) -> Unit,
+    onShareExternal: (File) -> Unit
 ) {
     val palette = LocalPlainTextPalette.current
 
@@ -561,17 +346,319 @@ fun ActivePlainDialogHost(
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.94f)
+                .fillMaxWidth(0.92f)
                 .background(palette.background)
-                .border(2.dp, palette.cyan)
+                .border(1.5.dp, palette.cyan)
                 .padding(10.dp)
         ) {
             when (dialogState) {
+                is PlainDialogState.ItemActionMenu -> {
+                    val entries = dialogState.entries
+                    val first = entries.firstOrNull() ?: return@Box
+                    val isSingle = entries.size == 1
+                    val oppositeCode = dialogState.paneId.opposite().shortCode
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isSingle) "+-- [${first.name.take(24)}] --+" else "+-- [${entries.size} ITEMS SELECTED] --+",
+                                color = palette.purple,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            PlainTextActionLink(
+                                label = "X",
+                                accentColor = palette.red,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                        }
+                        AsciiDivider()
+
+                        // Natural file operations list
+                        if (isSingle && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = if (first.isPinned) "☆ Unpin from Top of List" else "★ Pin to Top of Main List",
+                                color = palette.yellow
+                            ) {
+                                viewModel.togglePinEntry(first)
+                            }
+                        }
+
+                        if (isSingle && !first.isDirectory && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Open in Default App",
+                                color = palette.green
+                            ) {
+                                viewModel.dismissDialog()
+                                viewModel.clearSelection(dialogState.paneId)
+                                onOpenExternal(File(first.path))
+                            }
+                        }
+
+                        if (!first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Copy (${entries.size})",
+                                color = palette.cyan
+                            ) {
+                                viewModel.stageToClipboard(dialogState.paneId, entries, ClipboardMode.COPY)
+                            }
+                            MenuOperationRow(
+                                label = "Cut / Move (${entries.size})",
+                                color = palette.orange
+                            ) {
+                                viewModel.stageToClipboard(dialogState.paneId, entries, ClipboardMode.MOVE)
+                            }
+                        }
+
+                        if (hasClipboard && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Paste Clipboard Into ${dialogState.paneId.shortCode}",
+                                color = palette.green
+                            ) {
+                                viewModel.pasteClipboardIntoPane(dialogState.paneId)
+                            }
+                        }
+
+                        MenuOperationRow(
+                            label = if (first.isVirtualArchiveEntry) "Extract to Other Pane ($oppositeCode)" else "Copy to Other Pane ($oppositeCode)",
+                            color = palette.cyan
+                        ) {
+                            viewModel.copyOrMoveToOppositePane(dialogState.paneId, entries, move = false)
+                        }
+
+                        if (!first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Move to Other Pane ($oppositeCode)",
+                                color = palette.orange
+                            ) {
+                                viewModel.copyOrMoveToOppositePane(dialogState.paneId, entries, move = true)
+                            }
+                        }
+
+                        if (isSingle && first.isArchive && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Extract Archive...",
+                                color = palette.green
+                            ) {
+                                viewModel.openExtractDialog(dialogState.paneId, first.path)
+                            }
+                            MenuOperationRow(
+                                label = "Browse Inside Archive",
+                                color = palette.orange
+                            ) {
+                                viewModel.dismissDialog()
+                                viewModel.clearSelection(dialogState.paneId)
+                                viewModel.loadVirtualArchive(dialogState.paneId, first.path)
+                            }
+                        }
+
+                        if (!first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Compress to Archive (.zip, .7z, .tar...)",
+                                color = palette.pink
+                            ) {
+                                viewModel.openCompressDialog(dialogState.paneId, entries)
+                            }
+                        }
+
+                        if (isSingle && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Rename",
+                                color = palette.yellow
+                            ) {
+                                viewModel.showDialog(PlainDialogState.RenameEntry(dialogState.paneId, first))
+                            }
+                        } else if (entries.size > 1 && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Batch Rename (${entries.size} items)...",
+                                color = palette.yellow
+                            ) {
+                                viewModel.showDialog(PlainDialogState.BatchRename(dialogState.paneId, entries))
+                            }
+                        }
+
+                        MenuOperationRow(
+                            label = "Keep Selected (Select More Items)",
+                            color = palette.purple
+                        ) {
+                            viewModel.dismissDialog()
+                        }
+
+                        if (isSingle) {
+                            MenuOperationRow(
+                                label = "File Details & Checksums (Double-Tap)",
+                                color = palette.cyan
+                            ) {
+                                viewModel.onDoubleTapEntry(dialogState.paneId, first)
+                            }
+                        }
+
+                        if (isSingle && !first.isDirectory && !first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Share File",
+                                color = palette.foreground
+                            ) {
+                                viewModel.dismissDialog()
+                                viewModel.clearSelection(dialogState.paneId)
+                                onShareExternal(File(first.path))
+                            }
+                        }
+
+                        if (!first.isVirtualArchiveEntry) {
+                            MenuOperationRow(
+                                label = "Delete (${entries.size})",
+                                color = palette.red
+                            ) {
+                                viewModel.showDialog(PlainDialogState.DeleteConfirm(dialogState.paneId, entries))
+                            }
+                        }
+                    }
+                }
+
+                is PlainDialogState.SortModal -> {
+                    val pane = viewModel.uiState.value.getPane(dialogState.paneId)
+                    val currentSort = pane.sortConfig
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "+-- [SORT ${dialogState.paneId.label}] --+",
+                                color = palette.yellow,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            PlainTextActionLink(
+                                label = "CLOSE",
+                                accentColor = palette.comment,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                        }
+                        AsciiDivider()
+                        Text(
+                            text = "Pinned items are always kept at the top of the main list.",
+                            color = palette.comment,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.5.sp
+                        )
+                        SortField.entries.forEach { field ->
+                            val isSelected = currentSort.field == field
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(if (isSelected) palette.selection else Color.Transparent)
+                                    .clickable {
+                                        val nextOrder = if (isSelected) currentSort.order.toggle() else currentSort.order
+                                        viewModel.updateSortConfig(dialogState.paneId, field, nextOrder)
+                                        viewModel.dismissDialog()
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "${if (isSelected) "* " else "  "}${field.label}",
+                                    color = if (isSelected) palette.yellow else palette.foreground,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 12.sp
+                                )
+                                if (isSelected) {
+                                    Text(
+                                        text = "${currentSort.order.label} (${currentSort.order.symbol})",
+                                        color = palette.cyan,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                is PlainDialogState.BatchRename -> {
+                    var prefix by remember { mutableStateOf("item_") }
+                    var startNumText by remember { mutableStateOf("1") }
+                    val startNum = startNumText.toIntOrNull() ?: 1
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "+-- [BATCH RENAME ${dialogState.entries.size} ITEMS] --+",
+                            color = palette.yellow,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                        AsciiDivider()
+                        AsciiTextField(
+                            value = prefix,
+                            onValueChange = { prefix = it },
+                            label = "NAME PREFIX"
+                        )
+                        AsciiTextField(
+                            value = startNumText,
+                            onValueChange = { startNumText = it.filter { c -> c.isDigit() } },
+                            label = "START NUMBER"
+                        )
+                        Text(
+                            text = "Preview:",
+                            color = palette.comment,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp
+                        )
+                        dialogState.entries.take(3).forEachIndexed { idx, item ->
+                            val numStr = String.format(Locale.US, "%02d", startNum + idx)
+                            val ext = if (!item.isDirectory && item.extension.isNotEmpty()) ".${item.extension}" else ""
+                            Text(
+                                text = " ${item.name} -> ${prefix.ifEmpty { "item_" }}$numStr$ext",
+                                color = palette.green,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.5.sp
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            PlainTextActionLink(
+                                label = "CANCEL",
+                                accentColor = palette.comment,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                            PlainTextActionLink(
+                                label = "RENAME ALL",
+                                accentColor = palette.green,
+                                onClick = {
+                                    viewModel.executeBatchRename(
+                                        paneId = dialogState.paneId,
+                                        entries = dialogState.entries,
+                                        prefix = prefix,
+                                        startNumber = startNum
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+
                 is PlainDialogState.CreateFolder -> {
                     var folderName by remember { mutableStateOf("new_folder") }
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [CREATE NEW DIRECTORY IN ${dialogState.paneId.label}] --+",
+                            text = "+-- [NEW FOLDER IN ${dialogState.paneId.label}] --+",
                             color = palette.purple,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -593,7 +680,7 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "CREATE DIR",
+                                label = "CREATE",
                                 accentColor = palette.green,
                                 onClick = { viewModel.createNewFolder(dialogState.paneId, folderName) }
                             )
@@ -601,12 +688,11 @@ fun ActivePlainDialogHost(
                     }
                 }
 
-                is PlainDialogState.CreateTextFile -> {
-                    var fileName by remember { mutableStateOf("notes.txt") }
-                    var content by remember { mutableStateOf("") }
+                is PlainDialogState.CreateFile -> {
+                    var fileName by remember { mutableStateOf("new_file.txt") }
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [CREATE NEW PLAIN-TEXT FILE IN ${dialogState.paneId.label}] --+",
+                            text = "+-- [NEW FILE IN ${dialogState.paneId.label}] --+",
                             color = palette.purple,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -618,13 +704,6 @@ fun ActivePlainDialogHost(
                             onValueChange = { fileName = it },
                             label = "FILE NAME"
                         )
-                        AsciiTextField(
-                            value = content,
-                            onValueChange = { content = it },
-                            label = "INITIAL CONTENT (UTF-8)",
-                            singleLine = false,
-                            modifier = Modifier.heightIn(min = 90.dp, max = 180.dp)
-                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End
@@ -635,11 +714,9 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "SAVE FILE",
+                                label = "CREATE",
                                 accentColor = palette.green,
-                                onClick = {
-                                    viewModel.createNewPlainTextFile(dialogState.paneId, fileName, content)
-                                }
+                                onClick = { viewModel.createNewFile(dialogState.paneId, fileName) }
                             )
                         }
                     }
@@ -649,19 +726,13 @@ fun ActivePlainDialogHost(
                     var newName by remember { mutableStateOf(dialogState.entry.name) }
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [RENAME ITEM] --+",
+                            text = "+-- [RENAME] --+",
                             color = palette.yellow,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
                         AsciiDivider()
-                        Text(
-                            text = "CURRENT: ${dialogState.entry.name}",
-                            color = palette.comment,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        )
                         AsciiTextField(
                             value = newName,
                             onValueChange = { newName = it },
@@ -677,7 +748,7 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "RENAME",
+                                label = "SAVE",
                                 accentColor = palette.green,
                                 onClick = {
                                     viewModel.renameFileEntry(dialogState.paneId, dialogState.entry, newName)
@@ -690,7 +761,7 @@ fun ActivePlainDialogHost(
                 is PlainDialogState.DeleteConfirm -> {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [CONFIRM PERMANENT DELETION] --+",
+                            text = "+-- [CONFIRM DELETE] --+",
                             color = palette.red,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -698,23 +769,15 @@ fun ActivePlainDialogHost(
                         )
                         AsciiDivider(color = palette.red)
                         Text(
-                            text = "Delete ${dialogState.entries.size} item(s) permanently from disk?",
+                            text = "Permanently delete ${dialogState.entries.size} item(s)?",
                             color = palette.foreground,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp
                         )
-                        dialogState.entries.take(6).forEach { item ->
+                        dialogState.entries.take(5).forEach { item ->
                             Text(
-                                text = " - ${item.category.asciiBadge} ${item.name}",
+                                text = " - ${item.name}",
                                 color = palette.orange,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp
-                            )
-                        }
-                        if (dialogState.entries.size > 6) {
-                            Text(
-                                text = " ... and ${dialogState.entries.size - 6} more",
-                                color = palette.comment,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp
                             )
@@ -729,7 +792,7 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "CONFIRM DELETE",
+                                label = "DELETE",
                                 accentColor = palette.red,
                                 onClick = {
                                     viewModel.deleteFileEntries(dialogState.paneId, dialogState.entries)
@@ -758,7 +821,7 @@ fun ActivePlainDialogHost(
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [COMPRESS ${dialogState.entries.size} ITEM(S) TO ARCHIVE] --+",
+                            text = "+-- [COMPRESS ${dialogState.entries.size} ITEM(S)] --+",
                             color = palette.pink,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -768,15 +831,7 @@ fun ActivePlainDialogHost(
                         AsciiTextField(
                             value = archiveBase,
                             onValueChange = { archiveBase = it },
-                            label = "ARCHIVE BASE NAME (Output: $archiveBase.${selectedFormat.primaryExtension})"
-                        )
-
-                        Text(
-                            text = "FORMAT:",
-                            color = palette.cyan,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
+                            label = "OUTPUT: $archiveBase.${selectedFormat.primaryExtension}"
                         )
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -790,41 +845,25 @@ fun ActivePlainDialogHost(
                                 )
                             }
                         }
-
-                        Text(
-                            text = "DESTINATION DIRECTORY:",
-                            color = palette.cyan,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             PlainTextActionLink(
-                                label = "CURRENT (${dialogState.paneId.shortCode})",
+                                label = "HERE (${dialogState.paneId.shortCode})",
                                 isActive = !outputToOpposite,
                                 onClick = { outputToOpposite = false }
                             )
                             PlainTextActionLink(
-                                label = "OPPOSITE (${dialogState.paneId.opposite().shortCode})",
+                                label = "OTHER PANE (${dialogState.paneId.opposite().shortCode})",
                                 isActive = outputToOpposite,
                                 onClick = { outputToOpposite = true }
                             )
                         }
-                        Text(
-                            text = if (outputToOpposite) dialogState.oppositeDirPath else dialogState.currentDirPath,
-                            color = palette.comment,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp
-                        )
-
                         if (selectedFormat.supportsPassword) {
                             AsciiTextField(
                                 value = password,
                                 onValueChange = { password = it },
-                                label = "OPTIONAL AES-256 PASSWORD (LEAVE BLANK FOR NONE)"
+                                label = "OPTIONAL AES-256 PASSWORD"
                             )
                         }
-
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End
@@ -835,18 +874,14 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "START COMPRESSION",
+                                label = "COMPRESS",
                                 accentColor = palette.green,
                                 onClick = {
-                                    val targetDir = if (outputToOpposite) {
-                                        dialogState.oppositeDirPath
-                                    } else {
-                                        dialogState.currentDirPath
-                                    }
+                                    val dest = if (outputToOpposite) dialogState.oppositeDirPath else dialogState.currentDirPath
                                     viewModel.executeCompressArchive(
                                         paneId = dialogState.paneId,
                                         entries = dialogState.entries,
-                                        destinationDirPath = targetDir,
+                                        destinationDirPath = dest,
                                         archiveBaseName = archiveBase,
                                         format = selectedFormat,
                                         password = password
@@ -866,28 +901,13 @@ fun ActivePlainDialogHost(
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [EXTRACT ARCHIVE: ${dialogState.archiveName}] --+",
+                            text = "+-- [EXTRACT: ${dialogState.archiveName}] --+",
                             color = palette.green,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
                         AsciiDivider()
-                        if (dialogState.selectedVirtualPaths != null) {
-                            Text(
-                                text = "Selective Extraction: ${dialogState.selectedVirtualPaths.size} entry/entries",
-                                color = palette.yellow,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp
-                            )
-                        }
-                        Text(
-                            text = "TARGET PANE:",
-                            color = palette.cyan,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             PlainTextActionLink(
                                 label = "HERE (${dialogState.paneId.shortCode})",
@@ -895,41 +915,32 @@ fun ActivePlainDialogHost(
                                 onClick = { extractToOpposite = false }
                             )
                             PlainTextActionLink(
-                                label = "OPPOSITE (${dialogState.paneId.opposite().shortCode})",
+                                label = "OTHER PANE (${dialogState.paneId.opposite().shortCode})",
                                 isActive = extractToOpposite,
                                 onClick = { extractToOpposite = true }
                             )
                         }
-                        Text(
-                            text = if (extractToOpposite) dialogState.oppositeDirPath else dialogState.currentDirPath,
-                            color = palette.comment,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp
-                        )
-
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = "CREATE SUBFOLDER:",
-                                color = palette.cyan,
+                                text = "Subfolder:",
+                                color = palette.comment,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp
                             )
                             PlainTextActionLink(
-                                label = if (createSubfolder) "YES" else "NO (DIRECT)",
+                                label = if (createSubfolder) "YES" else "NO",
                                 isActive = createSubfolder,
                                 onClick = { createSubfolder = !createSubfolder }
                             )
                         }
-
                         AsciiTextField(
                             value = password,
                             onValueChange = { password = it },
-                            label = "PASSWORD (IF ENCRYPTED ZIP)"
+                            label = "PASSWORD (IF ENCRYPTED)"
                         )
-
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End
@@ -940,14 +951,10 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "EXTRACT NOW",
+                                label = "EXTRACT",
                                 accentColor = palette.green,
                                 onClick = {
-                                    val dest = if (extractToOpposite) {
-                                        dialogState.oppositeDirPath
-                                    } else {
-                                        dialogState.currentDirPath
-                                    }
+                                    val dest = if (extractToOpposite) dialogState.oppositeDirPath else dialogState.currentDirPath
                                     viewModel.executeExtractArchive(
                                         archivePath = dialogState.archivePath,
                                         destinationDirPath = dest,
@@ -965,19 +972,13 @@ fun ActivePlainDialogHost(
                     var password by remember { mutableStateOf("") }
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [ENCRYPTED ARCHIVE PASSWORD] --+",
+                            text = "+-- [ARCHIVE PASSWORD] --+",
                             color = palette.orange,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
                         AsciiDivider()
-                        Text(
-                            text = "Archive: ${dialogState.archivePath.substringAfterLast('/')}",
-                            color = palette.foreground,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        )
                         AsciiTextField(
                             value = password,
                             onValueChange = { password = it },
@@ -993,7 +994,7 @@ fun ActivePlainDialogHost(
                                 onClick = { viewModel.dismissDialog() }
                             )
                             PlainTextActionLink(
-                                label = "UNLOCK & BROWSE",
+                                label = "UNLOCK",
                                 accentColor = palette.green,
                                 onClick = {
                                     viewModel.dismissDialog()
@@ -1008,94 +1009,32 @@ fun ActivePlainDialogHost(
                         }
                     }
                 }
-
-                is PlainDialogState.TextViewerEditor -> {
-                    var textValue by remember { mutableStateOf(dialogState.content) }
-                    val lineCount = remember(textValue) { textValue.lines().size }
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 280.dp, max = 560.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "+-- [${if (dialogState.isReadOnly) "VIEW" else "EDIT"}: ${dialogState.entry.name}] --+",
-                                color = palette.yellow,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                            Text(
-                                text = "$lineCount lines",
-                                color = palette.comment,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp
-                            )
-                        }
-                        AsciiDivider()
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .background(palette.backgroundDark)
-                                .border(1.dp, palette.currentLine)
-                                .padding(6.dp)
-                                .verticalScroll(rememberScrollState())
-                        ) {
-                            if (dialogState.isReadOnly) {
-                                Text(
-                                    text = textValue,
-                                    color = palette.foreground,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp
-                                )
-                            } else {
-                                BasicTextField(
-                                    value = textValue,
-                                    onValueChange = { textValue = it },
-                                    textStyle = TextStyle(
-                                        color = palette.foreground,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.sp,
-                                        lineHeight = 15.sp
-                                    ),
-                                    cursorBrush = SolidColor(palette.pink),
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            PlainTextActionLink(
-                                label = "CLOSE",
-                                accentColor = palette.comment,
-                                onClick = { viewModel.dismissDialog() }
-                            )
-                            if (!dialogState.isReadOnly) {
-                                PlainTextActionLink(
-                                    label = "SAVE CHANGES",
-                                    accentColor = palette.green,
-                                    onClick = {
-                                        viewModel.saveEditedTextFile(
-                                            paneId = dialogState.paneId,
-                                            entry = dialogState.entry,
-                                            newContent = textValue
-                                        )
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
             }
         }
+    }
+}
+
+@Composable
+private fun MenuOperationRow(
+    label: String,
+    color: Color,
+    onClick: () -> Unit
+) {
+    val palette = LocalPlainTextPalette.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(palette.backgroundDark)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "> $label",
+            color = color,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            fontSize = 12.sp
+        )
     }
 }

@@ -14,7 +14,6 @@ import net.lingala.zip4j.model.enums.AesKeyStrength
 import net.lingala.zip4j.model.enums.CompressionLevel
 import net.lingala.zip4j.model.enums.CompressionMethod
 import net.lingala.zip4j.model.enums.EncryptionMethod
-import org.apache.commons.compress.archivers.ArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.sevenz.SevenZMethod
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
@@ -29,21 +28,12 @@ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.Locale
 
-/**
- * Comprehensive Archive Engine supporting:
- * - Virtual Archive Directory Browsing (step inside ZIP, APK, JAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, 7Z, GZ, BZ2, XZ)
- * - Password-protected ZIP reading, extraction, and AES-256 creation (via Zip4j)
- * - Full Archive Extraction & Selective Virtual Entry Extraction with Zip-Slip protection
- * - Archive Creation in ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, and 7Z formats
- * - Archive Integrity Testing & Summary Inspection
- */
 class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
 
     private data class RawArchiveNode(
@@ -70,7 +60,6 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
             val allNodes = readAllArchiveNodes(archiveFile, format, password)
             val normalizedPrefix = internalDir.trim('/').let { if (it.isEmpty()) "" else "$it/" }
 
-            // Synthesize direct children for normalizedPrefix
             val directMap = linkedMapOf<String, FileEntry>()
             val subDirChildCounts = mutableMapOf<String, MutableSet<String>>()
 
@@ -84,7 +73,6 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
 
                 val slashIndex = remainder.indexOf('/')
                 if (slashIndex < 0) {
-                    // Direct child of current virtual directory
                     val name = remainder
                     if (!sortConfig.showHidden && name.startsWith(".")) continue
                     val ext = if (node.isDirectory) "" else name.substringAfterLast('.', "").lowercase(Locale.ROOT)
@@ -120,7 +108,6 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                         )
                     )
                 } else {
-                    // Implicit or explicit subdirectory
                     val dirName = remainder.substring(0, slashIndex)
                     val afterDir = remainder.substring(slashIndex + 1)
                     if (!sortConfig.showHidden && dirName.startsWith(".")) continue
@@ -210,70 +197,29 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
         }
     }
 
-    suspend fun readVirtualEntryPreview(
+    /**
+     * Extracts a single virtual archive entry to a temporary cache file so it can be opened
+     * immediately in its default Android app.
+     */
+    suspend fun extractSingleEntryToCache(
         archivePath: String,
         internalPath: String,
-        password: String? = null,
-        maxBytes: Int = 32 * 1024
-    ): String? = withContext(Dispatchers.IO) {
+        cacheDir: File,
+        password: String? = null
+    ): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
-            val archiveFile = File(archivePath)
-            val format = ArchiveFormat.fromFileName(archiveFile.name) ?: return@runCatching null
-            val targetClean = internalPath.trim('/')
-
-            val bytes = when (format) {
-                ArchiveFormat.ZIP -> {
-                    val zf = ZipFile(archiveFile)
-                    if (zf.isEncrypted && !password.isNullOrEmpty()) {
-                        zf.setPassword(password.toCharArray())
-                    }
-                    val header = zf.fileHeaders.firstOrNull { it.fileName.trim('/') == targetClean }
-                        ?: return@runCatching null
-                    zf.getInputStream(header).use { readCappedBytes(it, maxBytes) }
-                }
-                ArchiveFormat.SEVEN_Z -> {
-                    SevenZFile(archiveFile).use { sz ->
-                        var entry = sz.nextEntry
-                        while (entry != null) {
-                            if (entry.name.trim('/') == targetClean && !entry.isDirectory) {
-                                val out = ByteArrayOutputStream()
-                                val buf = ByteArray(4096)
-                                var remaining = maxBytes
-                                while (remaining > 0) {
-                                    val r = sz.read(buf, 0, buf.size.coerceAtMost(remaining))
-                                    if (r <= 0) break
-                                    out.write(buf, 0, r)
-                                    remaining -= r
-                                }
-                                return@use out.toByteArray()
-                            }
-                            entry = sz.nextEntry
-                        }
-                        null
-                    }
-                }
-                ArchiveFormat.TAR, ArchiveFormat.TAR_GZ, ArchiveFormat.TAR_BZ2, ArchiveFormat.TAR_XZ -> {
-                    openTarInputStream(archiveFile, format).use { tis ->
-                        var entry = tis.nextTarEntry
-                        while (entry != null) {
-                            if (entry.name.trim('/') == targetClean && !entry.isDirectory) {
-                                return@use readCappedBytes(tis, maxBytes)
-                            }
-                            entry = tis.nextTarEntry
-                        }
-                        null
-                    }
-                }
-                ArchiveFormat.GZIP, ArchiveFormat.BZIP2, ArchiveFormat.XZ -> {
-                    openSingleCompressorStream(archiveFile, format).use { cis ->
-                        readCappedBytes(cis, maxBytes)
-                    }
-                }
-            } ?: return@runCatching null
-
-            if (bytes.any { it == 0.toByte() }) return@runCatching "(Binary content inside archive)"
-            String(bytes, Charsets.UTF_8)
-        }.getOrNull()
+            val tempRoot = File(cacheDir, "archive_open_cache").apply { mkdirs() }
+            extractArchive(
+                archivePath = archivePath,
+                destinationDirPath = tempRoot.absolutePath,
+                createSubfolder = false,
+                password = password,
+                selectedVirtualPaths = setOf(internalPath)
+            ).getOrThrow()
+            val target = File(tempRoot, internalPath.trimStart('/', '\\'))
+            require(target.exists()) { "Could not extract entry: $internalPath" }
+            target
+        }
     }
 
     suspend fun extractArchive(
@@ -281,7 +227,8 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
         destinationDirPath: String,
         createSubfolder: Boolean = true,
         password: String? = null,
-        selectedVirtualPaths: Set<String>? = null
+        selectedVirtualPaths: Set<String>? = null,
+        onProgress: ((Int, Int, String) -> Unit)? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             val archiveFile = File(archivePath)
@@ -319,8 +266,10 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                         }
                         zipFile.setPassword(password.toCharArray())
                     }
-                    for (header in zipFile.fileHeaders) {
-                        if (!matchesFilter(header.fileName)) continue
+                    val headers = zipFile.fileHeaders.filter { matchesFilter(it.fileName) }
+                    val total = headers.size.coerceAtLeast(1)
+                    headers.forEachIndexed { idx, header ->
+                        onProgress?.invoke(idx + 1, total, "Extracting ${header.fileName.substringAfterLast('/')}")
                         val outFile = resolveSafeOutputFile(baseDestDir, canonicalDestRoot, header.fileName)
                         if (header.isDirectory) {
                             outFile.mkdirs()
@@ -342,6 +291,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                         var entry = sevenZ.nextEntry
                         while (entry != null) {
                             if (matchesFilter(entry.name)) {
+                                onProgress?.invoke(extractedCount + 1, extractedCount + 2, "Extracting ${entry.name.substringAfterLast('/')}")
                                 val outFile = resolveSafeOutputFile(baseDestDir, canonicalDestRoot, entry.name)
                                 if (entry.isDirectory) {
                                     outFile.mkdirs()
@@ -370,6 +320,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                         var entry = tis.nextTarEntry
                         while (entry != null) {
                             if (matchesFilter(entry.name)) {
+                                onProgress?.invoke(extractedCount + 1, extractedCount + 2, "Extracting ${entry.name.substringAfterLast('/')}")
                                 val outFile = resolveSafeOutputFile(baseDestDir, canonicalDestRoot, entry.name)
                                 if (entry.isDirectory) {
                                     outFile.mkdirs()
@@ -394,6 +345,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                     val outName = stripArchiveExtensions(archiveFile.name).ifEmpty { "decompressed_output" }
                     val outFile = resolveSafeOutputFile(baseDestDir, canonicalDestRoot, outName)
                     outFile.parentFile?.mkdirs()
+                    onProgress?.invoke(1, 1, "Extracting $outName")
                     openSingleCompressorStream(archiveFile, format).use { cis ->
                         BufferedOutputStream(FileOutputStream(outFile)).use { out ->
                             cis.copyTo(out, 32 * 1024)
@@ -412,7 +364,8 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
         destinationDirPath: String,
         archiveBaseName: String,
         format: ArchiveFormat,
-        password: String? = null
+        password: String? = null,
+        onProgress: ((Int, Int, String) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             require(sourceEntries.isNotEmpty()) { "Select at least one file or folder to compress." }
@@ -425,6 +378,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
 
             val sourceFiles = sourceEntries.map { File(it.path) }.filter { it.exists() }
             require(sourceFiles.isNotEmpty()) { "No valid source files found on disk." }
+            val totalSources = sourceFiles.size.coerceAtLeast(1)
 
             when (format) {
                 ArchiveFormat.ZIP -> {
@@ -442,7 +396,8 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                     } else {
                         ZipFile(outputFile)
                     }
-                    for (src in sourceFiles) {
+                    sourceFiles.forEachIndexed { idx, src ->
+                        onProgress?.invoke(idx + 1, totalSources, "Compressing ${src.name}")
                         if (src.isDirectory) {
                             zipFile.addFolder(src, params)
                         } else {
@@ -475,7 +430,8 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                                 }
                             }
                         }
-                        for (src in sourceFiles) {
+                        sourceFiles.forEachIndexed { idx, src ->
+                            onProgress?.invoke(idx + 1, totalSources, "Compressing ${src.name}")
                             addSevenZRecursive(src, src.name)
                         }
                     }
@@ -497,7 +453,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                         fun addTarRecursive(file: File, relativePath: String) {
                             val entry = TarArchiveEntry(file, relativePath)
                             if (file.isFile && file.canExecute()) {
-                                entry.mode = 493 // 0755
+                                entry.mode = 493
                             }
                             tos.putArchiveEntry(entry)
                             if (file.isFile) {
@@ -513,7 +469,8 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
                             }
                         }
 
-                        for (src in sourceFiles) {
+                        sourceFiles.forEachIndexed { idx, src ->
+                            onProgress?.invoke(idx + 1, totalSources, "Compressing ${src.name}")
                             addTarRecursive(src, src.name)
                         }
                         tos.finish()
@@ -522,7 +479,8 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
 
                 ArchiveFormat.GZIP, ArchiveFormat.BZIP2, ArchiveFormat.XZ -> {
                     val singleFile = sourceFiles.first()
-                    require(singleFile.isFile) { "${format.displayName} compresses a single file. Use TAR.${format.primaryExtension.uppercase()} for folders." }
+                    require(singleFile.isFile) { "${format.displayName} compresses a single file." }
+                    onProgress?.invoke(1, 1, "Compressing ${singleFile.name}")
                     val rawOut = BufferedOutputStream(FileOutputStream(outputFile))
                     val compOut = when (format) {
                         ArchiveFormat.GZIP -> GzipCompressorOutputStream(rawOut)
@@ -539,85 +497,6 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
             }
 
             outputFile
-        }
-    }
-
-    suspend fun testArchiveIntegrity(
-        archivePath: String,
-        password: String? = null
-    ): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
-            val archiveFile = File(archivePath)
-            val format = ArchiveFormat.fromFileName(archiveFile.name)
-                ?: throw IllegalArgumentException("Unsupported archive format.")
-            var verifiedFiles = 0
-            var totalBytesRead = 0L
-            val sink = ByteArray(32 * 1024)
-
-            when (format) {
-                ArchiveFormat.ZIP -> {
-                    val zf = ZipFile(archiveFile)
-                    if (zf.isEncrypted && !password.isNullOrEmpty()) {
-                        zf.setPassword(password.toCharArray())
-                    }
-                    for (header in zf.fileHeaders) {
-                        if (!header.isDirectory) {
-                            zf.getInputStream(header).use { stream ->
-                                var r = stream.read(sink)
-                                while (r > 0) {
-                                    totalBytesRead += r
-                                    r = stream.read(sink)
-                                }
-                            }
-                            verifiedFiles++
-                        }
-                    }
-                }
-                ArchiveFormat.SEVEN_Z -> {
-                    SevenZFile(archiveFile).use { sz ->
-                        var entry = sz.nextEntry
-                        while (entry != null) {
-                            if (!entry.isDirectory) {
-                                var r = sz.read(sink)
-                                while (r > 0) {
-                                    totalBytesRead += r
-                                    r = sz.read(sink)
-                                }
-                                verifiedFiles++
-                            }
-                            entry = sz.nextEntry
-                        }
-                    }
-                }
-                ArchiveFormat.TAR, ArchiveFormat.TAR_GZ, ArchiveFormat.TAR_BZ2, ArchiveFormat.TAR_XZ -> {
-                    openTarInputStream(archiveFile, format).use { tis ->
-                        var entry = tis.nextTarEntry
-                        while (entry != null) {
-                            if (!entry.isDirectory) {
-                                var r = tis.read(sink)
-                                while (r > 0) {
-                                    totalBytesRead += r
-                                    r = tis.read(sink)
-                                }
-                                verifiedFiles++
-                            }
-                            entry = tis.nextTarEntry
-                        }
-                    }
-                }
-                ArchiveFormat.GZIP, ArchiveFormat.BZIP2, ArchiveFormat.XZ -> {
-                    openSingleCompressorStream(archiveFile, format).use { cis ->
-                        var r = cis.read(sink)
-                        while (r > 0) {
-                            totalBytesRead += r
-                            r = cis.read(sink)
-                        }
-                        verifiedFiles = 1
-                    }
-                }
-            }
-
-            "INTEGRITY OK: Verified $verifiedFiles files (${FileSystemRepository.formatBytes(totalBytesRead)} decompressed cleanly)."
         }
     }
 
@@ -664,7 +543,7 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
             }
             ArchiveFormat.TAR, ArchiveFormat.TAR_GZ, ArchiveFormat.TAR_BZ2, ArchiveFormat.TAR_XZ -> {
                 openTarInputStream(archiveFile, format).use { tis ->
-                    var entry: ArchiveEntry? = tis.nextEntry
+                    var entry: TarArchiveEntry? = tis.nextTarEntry
                     while (entry != null) {
                         nodes.add(
                             RawArchiveNode(
@@ -727,19 +606,6 @@ class ArchiveEngine(private val fileSystemRepository: FileSystemRepository) {
             throw SecurityException("Blocked Zip-Slip path traversal entry: $entryName")
         }
         return target
-    }
-
-    private fun readCappedBytes(input: InputStream, maxBytes: Int): ByteArray {
-        val out = ByteArrayOutputStream()
-        val buf = ByteArray(4096)
-        var remaining = maxBytes
-        while (remaining > 0) {
-            val read = input.read(buf, 0, buf.size.coerceAtMost(remaining))
-            if (read <= 0) break
-            out.write(buf, 0, read)
-            remaining -= read
-        }
-        return out.toByteArray()
     }
 
     companion object {

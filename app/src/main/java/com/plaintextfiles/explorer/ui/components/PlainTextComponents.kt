@@ -1,56 +1,165 @@
 package com.plaintextfiles.explorer.ui.components
 
-import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.plaintextfiles.explorer.model.PlainFileCategory
 import com.plaintextfiles.explorer.ui.theme.LocalPlainTextPalette
 
 /**
- * Plain-text ASCII horizontal divider mirroring plaintextsports.com section breaks.
+ * Custom theme-matched geometric/ASCII icon for common file formats and folders.
+ * Designed to fit the Dracula & Alucard plain-text aesthetic while giving instant visual recognition.
  */
+@Composable
+fun FileTypeIcon(
+    category: PlainFileCategory,
+    extension: String,
+    isPinned: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalPlainTextPalette.current
+
+    val iconColor = when {
+        isPinned && category == PlainFileCategory.DIRECTORY -> palette.yellow
+        category == PlainFileCategory.PARENT_DIR -> palette.yellow
+        category == PlainFileCategory.DIRECTORY -> palette.cyan
+        category == PlainFileCategory.SYMLINK -> palette.pink
+        category == PlainFileCategory.ARCHIVE -> palette.orange
+        category == PlainFileCategory.AUDIO -> palette.purple
+        category == PlainFileCategory.VIDEO -> palette.pink
+        category == PlainFileCategory.IMAGE -> palette.green
+        category == PlainFileCategory.PACKAGE -> palette.orange
+        category == PlainFileCategory.DOCUMENT -> palette.yellow
+        category == PlainFileCategory.TEXT_CODE -> palette.green
+        category == PlainFileCategory.EXECUTABLE -> palette.red
+        else -> palette.comment
+    }
+
+    val shortTag = when (category) {
+        PlainFileCategory.PARENT_DIR -> ".."
+        PlainFileCategory.DIRECTORY -> if (isPinned) "★D" else "DIR"
+        PlainFileCategory.SYMLINK -> "LNK"
+        PlainFileCategory.ARCHIVE -> extension.uppercase().take(3).ifEmpty { "ARC" }
+        PlainFileCategory.AUDIO -> extension.uppercase().take(3).ifEmpty { "AUD" }
+        PlainFileCategory.VIDEO -> extension.uppercase().take(3).ifEmpty { "VID" }
+        PlainFileCategory.IMAGE -> extension.uppercase().take(3).ifEmpty { "IMG" }
+        PlainFileCategory.PACKAGE -> "APK"
+        PlainFileCategory.DOCUMENT -> extension.uppercase().take(3).ifEmpty { "DOC" }
+        PlainFileCategory.TEXT_CODE -> extension.uppercase().take(3).ifEmpty { "TXT" }
+        PlainFileCategory.EXECUTABLE -> "EXE"
+        PlainFileCategory.BINARY -> extension.uppercase().take(3).ifEmpty { "FIL" }
+    }
+
+    Box(
+        modifier = modifier
+            .size(width = 30.dp, height = 20.dp)
+            .background(palette.backgroundDark),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.matchParentSize()) {
+            val strokePx = 1.2.dp.toPx()
+            val w = size.width
+            val h = size.height
+
+            when (category) {
+                PlainFileCategory.DIRECTORY, PlainFileCategory.PARENT_DIR -> {
+                    // Folder tab + box outline
+                    val path = Path().apply {
+                        moveTo(strokePx, h * 0.25f)
+                        lineTo(w * 0.42f, h * 0.25f)
+                        lineTo(w * 0.52f, h * 0.10f)
+                        lineTo(w - strokePx, h * 0.10f)
+                        lineTo(w - strokePx, h - strokePx)
+                        lineTo(strokePx, h - strokePx)
+                        close()
+                    }
+                    drawPath(path = path, color = iconColor, style = Stroke(width = strokePx))
+                }
+                PlainFileCategory.ARCHIVE -> {
+                    // Box with vertical zipper track on left
+                    drawRect(
+                        color = iconColor,
+                        topLeft = Offset(strokePx, strokePx),
+                        size = Size(w - strokePx * 2, h - strokePx * 2),
+                        style = Stroke(width = strokePx)
+                    )
+                    drawLine(
+                        color = iconColor,
+                        start = Offset(w * 0.18f, strokePx),
+                        end = Offset(w * 0.18f, h - strokePx),
+                        strokeWidth = strokePx
+                    )
+                }
+                else -> {
+                    // Dog-eared file outline on right corner
+                    val cut = h * 0.28f
+                    val path = Path().apply {
+                        moveTo(strokePx, strokePx)
+                        lineTo(w - cut, strokePx)
+                        lineTo(w - strokePx, cut)
+                        lineTo(w - strokePx, h - strokePx)
+                        lineTo(strokePx, h - strokePx)
+                        close()
+                    }
+                    drawPath(path = path, color = iconColor, style = Stroke(width = strokePx))
+                }
+            }
+        }
+
+        Text(
+            text = shortTag,
+            color = iconColor,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 8.5.sp,
+            maxLines = 1
+        )
+    }
+}
+
 @Composable
 fun AsciiDivider(
     char: Char = '-',
-    color: Color = LocalPlainTextPalette.current.comment,
+    color: Color = LocalPlainTextPalette.current.comment.copy(alpha = 0.45f),
     modifier: Modifier = Modifier
 ) {
-    val line = char.toString().repeat(140)
+    val line = char.toString().repeat(160)
     Text(
         text = line,
         color = color,
         fontFamily = FontFamily.Monospace,
-        fontSize = 11.sp,
+        fontSize = 9.sp,
+        lineHeight = 9.sp,
         maxLines = 1,
         overflow = TextOverflow.Clip,
         modifier = modifier.fillMaxWidth()
     )
 }
 
-/**
- * Clickable plain-text bracket link or underlined text link (no icons, pure text).
- */
 @Composable
 fun PlainTextActionLink(
     label: String,
@@ -63,8 +172,8 @@ fun PlainTextActionLink(
 ) {
     val palette = LocalPlainTextPalette.current
     val fgColor = when {
-        accentColor != null -> accentColor
         isActive -> palette.background
+        accentColor != null -> accentColor
         else -> palette.cyan
     }
     val bgColor = if (isActive) (accentColor ?: palette.purple) else Color.Transparent
@@ -75,130 +184,16 @@ fun PlainTextActionLink(
         color = fgColor,
         fontFamily = FontFamily.Monospace,
         fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-        fontSize = 12.sp,
+        fontSize = 11.5.sp,
         textDecoration = if (!isActive && underlineWhenInactive) TextDecoration.Underline else TextDecoration.None,
         maxLines = 1,
         modifier = modifier
             .background(bgColor)
             .clickable(onClick = onClick)
-            .padding(horizontal = 3.dp, vertical = 2.dp)
+            .padding(horizontal = 4.dp, vertical = 2.dp)
     )
 }
 
-/**
- * Plain-text scoreboard-style ASCII box mirroring https://plaintextsports.com/
- * Example:
- * +------------------------+
- * | PANE 1 (ACTIVE)        |
- * | /storage/emulated/0    |
- * | 24 items | 1.4 GB      |
- * +------------------------+
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun AsciiScoreBox(
-    title: String,
-    lines: List<String>,
-    modifier: Modifier = Modifier,
-    isFocused: Boolean = false,
-    titleColor: Color = LocalPlainTextPalette.current.purple,
-    borderColor: Color = if (isFocused) LocalPlainTextPalette.current.cyan else LocalPlainTextPalette.current.comment,
-    backgroundColor: Color = LocalPlainTextPalette.current.backgroundDark,
-    onClick: (() -> Unit)? = null,
-    onLongClick: (() -> Unit)? = null
-) {
-    val palette = LocalPlainTextPalette.current
-    val maxLen = (listOf(title) + lines).maxOfOrNull { it.length }?.coerceIn(14, 38) ?: 18
-    val horizontalBorder = "+" + "-".repeat(maxLen + 2) + "+"
-
-    val clickModifier = if (onClick != null || onLongClick != null) {
-        Modifier.combinedClickable(
-            onClick = { onClick?.invoke() },
-            onLongClick = { onLongClick?.invoke() }
-        )
-    } else {
-        Modifier
-    }
-
-    Column(
-        modifier = modifier
-            .background(backgroundColor)
-            .then(clickModifier)
-            .padding(2.dp)
-    ) {
-        Text(
-            text = horizontalBorder,
-            color = borderColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 13.sp,
-            maxLines = 1
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "| ",
-                color = borderColor,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                lineHeight = 13.sp
-            )
-            Text(
-                text = title.take(maxLen).padEnd(maxLen, ' '),
-                color = titleColor,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 11.sp,
-                lineHeight = 13.sp,
-                maxLines = 1
-            )
-            Text(
-                text = " |",
-                color = borderColor,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                lineHeight = 13.sp
-            )
-        }
-        lines.forEach { rawLine ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "| ",
-                    color = borderColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 13.sp
-                )
-                Text(
-                    text = rawLine.take(maxLen).padEnd(maxLen, ' '),
-                    color = palette.foreground,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 13.sp,
-                    maxLines = 1
-                )
-                Text(
-                    text = " |",
-                    color = borderColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 13.sp
-                )
-            }
-        }
-        Text(
-            text = horizontalBorder,
-            color = borderColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 13.sp,
-            maxLines = 1
-        )
-    }
-}
-
-/**
- * Full-width ASCII framed section container with `+--- TITLE ---+` header and bottom `+---+` border.
- */
 @Composable
 fun AsciiFramedSection(
     title: String,
@@ -229,7 +224,7 @@ fun AsciiFramedSection(
                 color = titleColor,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
+                fontSize = 11.5.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -238,12 +233,11 @@ fun AsciiFramedSection(
                     text = rightHeaderText,
                     color = palette.comment,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
+                    fontSize = 10.5.sp,
                     maxLines = 1
                 )
             }
         }
-        AsciiDivider(char = '-', color = borderColor)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -253,15 +247,12 @@ fun AsciiFramedSection(
     }
 }
 
-/**
- * Pure text ASCII bar meter, e.g. `[########------------] 42%`
- */
 @Composable
 fun AsciiUsageBar(
     fraction: Float,
     label: String,
     modifier: Modifier = Modifier,
-    barWidthChars: Int = 18
+    barWidthChars: Int = 14
 ) {
     val palette = LocalPlainTextPalette.current
     val clamped = fraction.coerceIn(0f, 1f)
