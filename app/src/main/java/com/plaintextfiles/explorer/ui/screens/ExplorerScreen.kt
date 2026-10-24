@@ -1,14 +1,14 @@
 package com.plaintextfiles.explorer.ui.screens
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -42,11 +43,13 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -54,17 +57,20 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.plaintextfiles.explorer.data.FileSystemRepository
 import com.plaintextfiles.explorer.model.AppSettings
+import com.plaintextfiles.explorer.model.ClipboardMode
 import com.plaintextfiles.explorer.model.DiffStatus
 import com.plaintextfiles.explorer.model.DualPaneMode
 import com.plaintextfiles.explorer.model.FileEntry
@@ -78,8 +84,11 @@ import com.plaintextfiles.explorer.ui.components.AsciiUsageBar
 import com.plaintextfiles.explorer.ui.components.FileTypeIcon
 import com.plaintextfiles.explorer.ui.components.PlainTextActionLink
 import com.plaintextfiles.explorer.ui.theme.LocalPlainTextPalette
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val FAST_SCROLL_BUCKETS = listOf(
     '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
@@ -95,6 +104,14 @@ fun ExplorerScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val palette = LocalPlainTextPalette.current
+
+    // Auto-dismiss feedback toast after 2.4 seconds
+    LaunchedEffect(state.toastMessage) {
+        if (state.toastMessage != null) {
+            delay(2400L)
+            viewModel.clearFeedback()
+        }
+    }
 
     if (state.isSettingsOpen) {
         SettingsScreen(
@@ -115,8 +132,8 @@ fun ExplorerScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // 1. Ultra-Compact Top Bar with 3-Dot Menu `[⋮]`
-        CompactTopBarWithThreeDotMenu(
+        // 1. Most-Used Quick Action Top Bar (No app name; direct Sort/Filter, Search, +New, Diff, Menu)
+        CompactQuickActionTopBar(
             state = state,
             activePane = activePane,
             viewModel = viewModel
@@ -148,29 +165,25 @@ fun ExplorerScreen(
             }
         }
 
-        // 3. Inline Filter Bar (only visible when Filter is toggled on)
+        // 3. Inline Search Bar (with Global vs Active Pane toggle)
         if (activePane.isSearchVisible || activePane.searchQuery.isNotEmpty()) {
-            InlineFilterBar(
+            InlineSearchBar(
                 paneId = activePane.paneId,
                 query = activePane.searchQuery,
+                isGlobal = state.settings.globalSortAndFilter,
                 onQueryChange = { viewModel.updateSearchQuery(activePane.paneId, it) },
+                onToggleGlobal = {
+                    viewModel.updateSettings { s -> s.copy(globalSortAndFilter = !s.globalSortAndFilter) }
+                },
                 onClose = { viewModel.setPaneSearchVisible(activePane.paneId, false) }
             )
         }
 
-        // 4. Main Dual-Pane / Single-Pane File Workspace (Maximized Space)
-        var totalHeightPx by remember { mutableFloatStateOf(1000f) }
-        var totalWidthPx by remember { mutableFloatStateOf(1000f) }
-        val splitRatio = state.settings.splitRatio
-
+        // 4. Main Dual-Pane / Single-Pane File Workspace (Static Clean Divider, No Split Dragging)
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .onSizeChanged { sz ->
-                    totalWidthPx = sz.width.toFloat().coerceAtLeast(1f)
-                    totalHeightPx = sz.height.toFloat().coerceAtLeast(1f)
-                }
         ) {
             when (state.settings.dualPaneMode) {
                 DualPaneMode.SPLIT_VERTICAL -> {
@@ -183,18 +196,12 @@ fun ExplorerScreen(
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
-                                .weight(splitRatio)
+                                .weight(1f)
                                 .fillMaxWidth()
                         )
-                        DraggableHorizontalSplitBar(
-                            activePaneId = state.activePaneId,
-                            onDragDeltaPx = { dy ->
-                                val nextRatio = splitRatio + (dy / totalHeightPx)
-                                viewModel.updateSplitRatio(nextRatio)
-                            },
-                            onDoubleTapReset = { viewModel.updateSplitRatio(0.50f) },
-                            onComparePanes = { viewModel.openComparePanesModal() },
-                            onSwapPanes = { viewModel.swapPanes() }
+                        AsciiDivider(
+                            char = '=',
+                            color = palette.purple.copy(alpha = 0.75f)
                         )
                         CompactFilePane(
                             paneState = state.paneB,
@@ -204,7 +211,7 @@ fun ExplorerScreen(
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
-                                .weight(1f - splitRatio)
+                                .weight(1f)
                                 .fillMaxWidth()
                         )
                     }
@@ -220,15 +227,14 @@ fun ExplorerScreen(
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
-                                .weight(splitRatio)
+                                .weight(1f)
                                 .fillMaxHeight()
                         )
-                        DraggableVerticalSplitBar(
-                            onDragDeltaPx = { dx ->
-                                val nextRatio = splitRatio + (dx / totalWidthPx)
-                                viewModel.updateSplitRatio(nextRatio)
-                            },
-                            onDoubleTapReset = { viewModel.updateSplitRatio(0.50f) }
+                        Box(
+                            modifier = Modifier
+                                .width(1.5.dp)
+                                .fillMaxHeight()
+                                .background(palette.purple.copy(alpha = 0.75f))
                         )
                         CompactFilePane(
                             paneState = state.paneB,
@@ -238,7 +244,7 @@ fun ExplorerScreen(
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
-                                .weight(1f - splitRatio)
+                                .weight(1f)
                                 .fillMaxHeight()
                         )
                     }
@@ -324,7 +330,15 @@ fun ExplorerScreen(
             }
         }
 
-        // 5. Auto-Hiding 1-Line Trash Undo Bar (Appears after moving items to Trash)
+        // 5. Contextual Quick Multi-Select Action Bar (Appears whenever 1+ items are selected)
+        if (activePane.selectedKeys.isNotEmpty()) {
+            QuickSelectionBottomBar(
+                activePane = activePane,
+                viewModel = viewModel
+            )
+        }
+
+        // 6. Auto-Hiding 1-Line Trash Undo Bar
         state.trashUndoBatch?.let { batch ->
             AsciiDivider(char = '-')
             Row(
@@ -365,7 +379,36 @@ fun ExplorerScreen(
             }
         }
 
-        // 6. Auto-Hiding 1-Line Bottom Progress Strip (Only visible during active file/archive operations)
+        // 7. Auto-Dismissing 1-Line Gesture & Operation Feedback Banner
+        state.toastMessage?.let { msg ->
+            AsciiDivider(char = '-')
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.backgroundDark)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "> $msg",
+                    color = palette.green,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                PlainTextActionLink(
+                    label = "X",
+                    accentColor = palette.comment,
+                    onClick = { viewModel.clearFeedback() }
+                )
+            }
+        }
+
+        // 8. Auto-Hiding 1-Line Bottom Progress Strip (Only visible during active transfers)
         state.transferProgress?.let { prog ->
             AsciiDivider(char = '=')
             Row(
@@ -397,7 +440,7 @@ fun ExplorerScreen(
         )
     }
 
-    // Long-Press Operations Menu, Compare & Sync, Share Target & Other Dialogs
+    // Long-Press Operations Menu, Sort & Filter Studio, Compare & Sync, Share Target & Other Dialogs
     state.activeDialog?.let { dlg ->
         ActivePlainDialogHost(
             dialogState = dlg,
@@ -409,77 +452,96 @@ fun ExplorerScreen(
     }
 }
 
+/**
+ * Top Bar without any app name — dedicated entirely to the most-used controls:
+ * Active Pane switch, Sort & Filter Studio, Instant Search, +New, Diff, Paste, and [⋮].
+ */
 @Composable
-private fun CompactTopBarWithThreeDotMenu(
+private fun CompactQuickActionTopBar(
     state: ExplorerUiState,
     activePane: PaneState,
     viewModel: ExplorerViewModel
 ) {
     val palette = LocalPlainTextPalette.current
     var menuExpanded by remember { mutableStateOf(false) }
+    val activeFilterCount = activePane.filterConfig.activeCount
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(palette.backgroundDark)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(horizontal = 6.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // Left: Scrollable strip of most-used everyday actions
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = "exp-txt",
-                color = palette.purple,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp
-            )
-            Text(
-                text = "[${activePane.paneId.shortCode}:${activePane.sortConfig.field.shortTag}${activePane.sortConfig.order.symbol}]",
-                color = palette.comment,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.5.sp,
-                modifier = Modifier.clickable {
-                    viewModel.showDialog(PlainDialogState.SortModal(activePane.paneId))
-                }
-            )
-            if (state.settings.showDiffHighlights) {
-                Text(
-                    text = "[DIFF]",
-                    color = palette.cyan,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 10.sp,
-                    modifier = Modifier.clickable {
-                        viewModel.openComparePanesModal()
-                    }
-                )
-            }
-        }
-
-        Row(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            if (activePane.selectedKeys.isNotEmpty()) {
-                PlainTextActionLink(
-                    label = "${activePane.selectedKeys.size} SEL",
-                    accentColor = palette.yellow,
-                    onClick = { viewModel.openSelectionActionMenu(activePane.paneId) }
-                )
-                PlainTextActionLink(
-                    label = "X",
-                    accentColor = palette.red,
-                    onClick = { viewModel.clearSelection(activePane.paneId) }
-                )
-            }
+            PlainTextActionLink(
+                label = activePane.paneId.shortCode,
+                isActive = true,
+                accentColor = palette.purple,
+                onClick = { viewModel.toggleActivePane() }
+            )
 
+            PlainTextActionLink(
+                label = "SORT:${activePane.sortConfig.field.shortTag}${activePane.sortConfig.order.symbol}",
+                accentColor = palette.cyan,
+                onClick = {
+                    viewModel.showDialog(PlainDialogState.SortAndFilterModal(activePane.paneId))
+                }
+            )
+
+            PlainTextActionLink(
+                label = if (activeFilterCount > 0) "FILTER($activeFilterCount)" else "FILTER",
+                isActive = activeFilterCount > 0,
+                accentColor = if (activeFilterCount > 0) palette.yellow else palette.cyan,
+                onClick = {
+                    viewModel.showDialog(PlainDialogState.SortAndFilterModal(activePane.paneId))
+                }
+            )
+
+            PlainTextActionLink(
+                label = "SEARCH",
+                isActive = activePane.isSearchVisible || activePane.searchQuery.isNotEmpty(),
+                accentColor = palette.pink,
+                onClick = {
+                    viewModel.setPaneSearchVisible(activePane.paneId, !activePane.isSearchVisible)
+                }
+            )
+
+            PlainTextActionLink(
+                label = "+NEW",
+                accentColor = palette.green,
+                onClick = {
+                    viewModel.showDialog(PlainDialogState.QuickCreateModal(activePane.paneId))
+                }
+            )
+
+            PlainTextActionLink(
+                label = "DIFF",
+                isActive = state.settings.showDiffHighlights,
+                accentColor = palette.orange,
+                onClick = {
+                    viewModel.openComparePanesModal()
+                }
+            )
+        }
+
+        // Right: Contextual Paste + 3-Dot Overflow Menu `[⋮]`
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
             state.clipboard?.let { clip ->
                 PlainTextActionLink(
                     label = "PASTE(${clip.entries.size})",
+                    isActive = true,
                     accentColor = palette.green,
                     onClick = { viewModel.pasteClipboardIntoPane(activePane.paneId) }
                 )
@@ -504,6 +566,16 @@ private fun CompactTopBarWithThreeDotMenu(
                         .background(palette.backgroundDark)
                         .border(1.dp, palette.currentLine)
                 ) {
+                    ThreeDotMenuItem("Sort & Filter Studio...") {
+                        menuExpanded = false
+                        viewModel.showDialog(PlainDialogState.SortAndFilterModal(activePane.paneId))
+                    }
+                    if (activePane.filterConfig.isActive || activePane.searchQuery.isNotEmpty()) {
+                        ThreeDotMenuItem("Clear All Active Filters") {
+                            menuExpanded = false
+                            viewModel.clearFiltersForPane(activePane.paneId)
+                        }
+                    }
                     ThreeDotMenuItem("Compare & Sync Panes (P1 <-> P2)...") {
                         menuExpanded = false
                         viewModel.openComparePanesModal()
@@ -515,22 +587,6 @@ private fun CompactTopBarWithThreeDotMenu(
                     ThreeDotMenuItem("Edit Raw Path (${activePane.paneId.shortCode}) [>_]") {
                         menuExpanded = false
                         viewModel.setPathEditorVisible(activePane.paneId, !activePane.isPathEditorVisible)
-                    }
-                    ThreeDotMenuItem("Sort By... (${activePane.sortConfig.field.shortTag} ${activePane.sortConfig.order.symbol})") {
-                        menuExpanded = false
-                        viewModel.showDialog(PlainDialogState.SortModal(activePane.paneId))
-                    }
-                    ThreeDotMenuItem(if (activePane.isSearchVisible) "Hide Filter Bar" else "Filter / Search") {
-                        menuExpanded = false
-                        viewModel.setPaneSearchVisible(activePane.paneId, !activePane.isSearchVisible)
-                    }
-                    ThreeDotMenuItem("+ New Folder") {
-                        menuExpanded = false
-                        viewModel.showDialog(PlainDialogState.CreateFolder(activePane.paneId))
-                    }
-                    ThreeDotMenuItem("+ New File") {
-                        menuExpanded = false
-                        viewModel.showDialog(PlainDialogState.CreateFile(activePane.paneId))
                     }
                     ThreeDotMenuItem(
                         if (activePane.selectedKeys.size == activePane.filteredEntries.size && activePane.filteredEntries.isNotEmpty()) {
@@ -582,6 +638,82 @@ private fun CompactTopBarWithThreeDotMenu(
     AsciiDivider(char = '=')
 }
 
+@Composable
+private fun QuickSelectionBottomBar(
+    activePane: PaneState,
+    viewModel: ExplorerViewModel
+) {
+    val palette = LocalPlainTextPalette.current
+    val selectedEntries = remember(activePane.entries, activePane.selectedKeys) {
+        activePane.entries.filter { it.uniqueKey in activePane.selectedKeys }
+    }
+    val oppositeCode = activePane.paneId.opposite().shortCode
+
+    AsciiDivider(char = '=')
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(palette.backgroundDark)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = "${selectedEntries.size} SEL:",
+            color = palette.yellow,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp
+        )
+        PlainTextActionLink(
+            label = "COPY",
+            accentColor = palette.cyan,
+            onClick = { viewModel.stageToClipboard(activePane.paneId, selectedEntries, ClipboardMode.COPY) }
+        )
+        PlainTextActionLink(
+            label = "CUT",
+            accentColor = palette.orange,
+            onClick = { viewModel.stageToClipboard(activePane.paneId, selectedEntries, ClipboardMode.MOVE) }
+        )
+        PlainTextActionLink(
+            label = "->$oppositeCode",
+            accentColor = palette.green,
+            onClick = { viewModel.copyOrMoveToOppositePane(activePane.paneId, selectedEntries, move = false) }
+        )
+        PlainTextActionLink(
+            label = "★PIN",
+            accentColor = palette.yellow,
+            onClick = { viewModel.pinSelectedInPane(activePane.paneId) }
+        )
+        PlainTextActionLink(
+            label = "ZIP",
+            accentColor = palette.pink,
+            onClick = { viewModel.openCompressDialog(activePane.paneId, selectedEntries) }
+        )
+        PlainTextActionLink(
+            label = "TRASH",
+            accentColor = palette.red,
+            onClick = { viewModel.deleteFileEntries(activePane.paneId, selectedEntries, forcePermanent = false) }
+        )
+        PlainTextActionLink(
+            label = "MORE...",
+            accentColor = palette.purple,
+            onClick = { viewModel.openSelectionActionMenu(activePane.paneId) }
+        )
+        PlainTextActionLink(
+            label = "ALL",
+            accentColor = palette.cyan,
+            onClick = { viewModel.selectAllInPane(activePane.paneId) }
+        )
+        PlainTextActionLink(
+            label = "X",
+            accentColor = palette.comment,
+            onClick = { viewModel.clearSelection(activePane.paneId) }
+        )
+    }
+}
+
 private fun nextLayoutModeLabel(current: DualPaneMode): String {
     val modes = DualPaneMode.entries
     val next = modes[(modes.indexOf(current) + 1) % modes.size]
@@ -608,10 +740,12 @@ private fun ThreeDotMenuItem(
 }
 
 @Composable
-private fun InlineFilterBar(
+private fun InlineSearchBar(
     paneId: PaneId,
     query: String,
+    isGlobal: Boolean,
     onQueryChange: (String) -> Unit,
+    onToggleGlobal: () -> Unit,
     onClose: () -> Unit
 ) {
     val palette = LocalPlainTextPalette.current
@@ -621,14 +755,14 @@ private fun InlineFilterBar(
             .background(palette.backgroundDark)
             .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Text(
-            text = "FILTER(${paneId.shortCode}):",
+            text = if (isGlobal) "SEARCH(ALL):" else "SEARCH(${paneId.shortCode}):",
             color = palette.pink,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp
+            fontSize = 10.5.sp
         )
         Box(
             modifier = Modifier
@@ -650,6 +784,12 @@ private fun InlineFilterBar(
                 modifier = Modifier.fillMaxWidth()
             )
         }
+        PlainTextActionLink(
+            label = if (isGlobal) "GLOBAL" else paneId.shortCode,
+            isActive = isGlobal,
+            accentColor = palette.cyan,
+            onClick = onToggleGlobal
+        )
         PlainTextActionLink(
             label = "X",
             accentColor = palette.red,
@@ -697,104 +837,6 @@ private fun CompactPagerTab(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun DraggableHorizontalSplitBar(
-    activePaneId: PaneId,
-    onDragDeltaPx: (Float) -> Unit,
-    onDoubleTapReset: () -> Unit,
-    onComparePanes: () -> Unit,
-    onSwapPanes: () -> Unit
-) {
-    val palette = LocalPlainTextPalette.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(palette.backgroundDark)
-            .border(0.5.dp, palette.currentLine)
-            .combinedClickable(
-                onClick = {},
-                onDoubleClick = onDoubleTapReset
-            )
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    onDragDeltaPx(dragAmount.y)
-                }
-            }
-            .padding(horizontal = 8.dp, vertical = 1.5.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = "ACTIVE:${activePaneId.shortCode}",
-            color = palette.purple,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            fontSize = 9.5.sp
-        )
-        Text(
-            text = "=== [ DRAG / 2xTAP=50:50 ] ===",
-            color = palette.comment,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.5.sp
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                text = "[DIFF]",
-                color = palette.cyan,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 9.5.sp,
-                modifier = Modifier.clickable(onClick = onComparePanes)
-            )
-            Text(
-                text = "[SWAP]",
-                color = palette.orange,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 9.5.sp,
-                modifier = Modifier.clickable(onClick = onSwapPanes)
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun DraggableVerticalSplitBar(
-    onDragDeltaPx: (Float) -> Unit,
-    onDoubleTapReset: () -> Unit
-) {
-    val palette = LocalPlainTextPalette.current
-    Box(
-        modifier = Modifier
-            .width(10.dp)
-            .fillMaxHeight()
-            .background(palette.backgroundDark)
-            .border(0.5.dp, palette.currentLine)
-            .combinedClickable(
-                onClick = {},
-                onDoubleClick = onDoubleTapReset
-            )
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    onDragDeltaPx(dragAmount.x)
-                }
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = "|",
-            color = palette.purple,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            fontSize = 11.sp
-        )
-    }
-}
-
 @Composable
 fun CompactFilePane(
     paneState: PaneState,
@@ -807,6 +849,7 @@ fun CompactFilePane(
 ) {
     val palette = LocalPlainTextPalette.current
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val paneId = paneState.paneId
     val internalRoot = remember { viewModel.fileRepo.internalStorageRoot() }
     val isInTrash = viewModel.fileRepo.isTrashPath(paneState.currentPath)
@@ -814,7 +857,8 @@ fun CompactFilePane(
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     var pullDistancePx by remember { mutableFloatStateOf(0f) }
-    val pullTriggerPx = with(LocalDensity.current) { 72.dp.toPx() }
+    var pullArmedHapticSent by remember { mutableStateOf(false) }
+    val pullTriggerPx = with(LocalDensity.current) { 68.dp.toPx() }
     var activeFastScrollLetter by remember { mutableStateOf<Char?>(null) }
     val hasParentRow = paneState.currentPath != internalRoot || paneState.isInsideArchive
 
@@ -824,6 +868,9 @@ fun CompactFilePane(
                 if (pullDistancePx > 0f && available.y < 0f) {
                     val consumed = available.y.coerceAtLeast(-pullDistancePx)
                     pullDistancePx += consumed
+                    if (pullDistancePx < pullTriggerPx) {
+                        pullArmedHapticSent = false
+                    }
                     return Offset(0f, consumed)
                 }
                 return Offset.Zero
@@ -838,7 +885,11 @@ fun CompactFilePane(
                     listState.firstVisibleItemIndex == 0 &&
                     listState.firstVisibleItemScrollOffset == 0
                 ) {
-                    pullDistancePx = (pullDistancePx + available.y * 0.5f).coerceAtMost(pullTriggerPx * 1.5f)
+                    pullDistancePx = (pullDistancePx + available.y * 0.55f).coerceAtMost(pullTriggerPx * 1.4f)
+                    if (pullDistancePx >= pullTriggerPx && !pullArmedHapticSent) {
+                        pullArmedHapticSent = true
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
                     return Offset(0f, available.y)
                 }
                 return Offset.Zero
@@ -846,9 +897,12 @@ fun CompactFilePane(
 
             override suspend fun onPreFling(available: Velocity): Velocity {
                 if (pullDistancePx >= pullTriggerPx) {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     viewModel.reloadPane(paneId)
+                    viewModel.showFeedback("Refreshed ${paneId.shortCode}")
                 }
                 pullDistancePx = 0f
+                pullArmedHapticSent = false
                 return Velocity.Zero
             }
         }
@@ -894,6 +948,42 @@ fun CompactFilePane(
             color = if (isFocused) palette.purple.copy(alpha = 0.7f) else palette.comment.copy(alpha = 0.4f)
         )
 
+        // Active Filter Strip (So user always sees active filters and can edit/clear in 1 tap)
+        if (paneState.filterConfig.isActive) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.backgroundDark)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "FILTER: ${paneState.filterConfig.toSummaryString()} (${paneState.filteredEntries.size}/${paneState.entries.size})",
+                    color = palette.yellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    PlainTextActionLink(
+                        label = "EDIT",
+                        accentColor = palette.cyan,
+                        onClick = { viewModel.showDialog(PlainDialogState.SortAndFilterModal(paneId)) }
+                    )
+                    PlainTextActionLink(
+                        label = "CLEAR X",
+                        accentColor = palette.red,
+                        onClick = { viewModel.clearFiltersForPane(paneId) }
+                    )
+                }
+            }
+            AsciiDivider()
+        }
+
         // Tap/Hold-to-Edit Raw Path Bar with Subfolder Auto-Complete
         if (paneState.isPathEditorVisible) {
             RawPathEditorBar(
@@ -902,21 +992,26 @@ fun CompactFilePane(
             )
         }
 
-        if (pullDistancePx > 12f || paneState.isLoading) {
+        // Progressive Pull-to-Refresh ASCII Feedback Bar
+        if (pullDistancePx > 8f || paneState.isLoading) {
+            val pct = (pullDistancePx / pullTriggerPx).coerceIn(0f, 1f)
+            val filled = (pct * 10).roundToInt()
+            val bar = "[" + "#".repeat(filled) + "-".repeat((10 - filled).coerceAtLeast(0)) + "]"
+            val pullLabel = when {
+                paneState.isLoading -> "  $bar REFRESHING ${paneId.shortCode}..."
+                pct >= 1f -> "  $bar ★ RELEASE TO REFRESH ${paneId.shortCode} ★"
+                else -> "  $bar PULL DOWN TO REFRESH (${(pct * 100).roundToInt()}%)"
+            }
             Text(
-                text = if (paneState.isLoading || pullDistancePx >= pullTriggerPx) {
-                    "  [↻ REFRESHING ${paneId.shortCode}...]"
-                } else {
-                    "  [↓ PULL DOWN TO REFRESH]"
-                },
-                color = palette.cyan,
+                text = pullLabel,
+                color = if (pct >= 1f) palette.green else palette.cyan,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 fontSize = 10.sp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(palette.backgroundDark)
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .padding(horizontal = 6.dp, vertical = 2.5.dp)
             )
         }
 
@@ -960,7 +1055,12 @@ fun CompactFilePane(
                     } else if (!paneState.isLoading && paneState.filteredEntries.isEmpty()) {
                         item(key = "..empty_row..") {
                             Text(
-                                text = if (isInTrash) "  (Trash Bin is empty)" else "  (Empty folder)",
+                                text = when {
+                                    isInTrash -> "  (Trash Bin is empty)"
+                                    paneState.filterConfig.isActive || paneState.searchQuery.isNotEmpty() ->
+                                        "  (No items match active filter/search)"
+                                    else -> "  (Empty folder)"
+                                },
                                 color = palette.comment,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
@@ -993,13 +1093,15 @@ fun CompactFilePane(
                                     )
                                 },
                                 onDoubleTap = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     viewModel.onDoubleTapEntry(paneId, entry)
                                 },
                                 onLongPress = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     viewModel.onLongPressEntry(paneId, entry)
                                 },
                                 onSwipeRightSelect = {
-                                    viewModel.toggleSelection(paneId, entry)
+                                    viewModel.toggleSelection(paneId, entry, fromSwipe = true)
                                 },
                                 onSwipeLeftPin = {
                                     viewModel.togglePinEntry(entry)
@@ -1010,12 +1112,16 @@ fun CompactFilePane(
                     }
                 }
 
-                // Razor-thin Fast-Scroll ASCII Index Rail (`# A-Z`)
-                if (settings.showFastScrollRail && paneState.filteredEntries.size >= 8) {
+                // Fixed Fast-Scroll ASCII Index Rail (`# A-Z`) that live-scrolls on touch & drag
+                if (settings.showFastScrollRail && paneState.filteredEntries.isNotEmpty()) {
                     FastScrollAsciiRail(
                         activeChar = activeFastScrollLetter,
                         onSelectChar = { targetChar ->
-                            activeFastScrollLetter = targetChar
+                            if (activeFastScrollLetter != targetChar) {
+                                activeFastScrollLetter = targetChar
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            viewModel.setActivePane(paneId)
                             val offset = if (hasParentRow) 1 else 0
                             val targetIdx = findIndexForBucket(paneState.filteredEntries, targetChar)
                             if (targetIdx >= 0) {
@@ -1031,14 +1137,17 @@ fun CompactFilePane(
                 }
             }
 
-            // Floating ASCII Fast-Scroll Letter Indicator (`+-- [ M ] --+`)
+            // Floating ASCII Fast-Scroll Letter + Matched Item Preview
             activeFastScrollLetter?.let { ch ->
-                Box(
+                val matchedIdx = findIndexForBucket(paneState.filteredEntries, ch)
+                val matchedName = paneState.filteredEntries.getOrNull(matchedIdx)?.name?.take(18).orEmpty()
+                Column(
                     modifier = Modifier
                         .align(Alignment.Center)
                         .background(palette.backgroundDark)
                         .border(1.5.dp, palette.purple)
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
                         text = "+-- [ $ch ] --+",
@@ -1047,22 +1156,55 @@ fun CompactFilePane(
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )
+                    if (matchedName.isNotEmpty()) {
+                        Text(
+                            text = matchedName,
+                            color = palette.cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * Finds the best matching row index for the highlighted `# A-Z` bucket so the LazyColumn
+ * always scrolls smoothly to that letter section.
+ */
 private fun findIndexForBucket(entries: List<FileEntry>, bucket: Char): Int {
     if (entries.isEmpty()) return -1
     if (bucket == '#') return 0
-    val exactOrAfter = entries.indexOfFirst { entry ->
+
+    // 1. Exact first-letter match (preferring non-pinned items so A-Z jumps into the main sorted list)
+    val exactUnpinned = entries.indexOfFirst { entry ->
         val firstChar = entry.name.trimStart('.').firstOrNull()?.uppercaseChar() ?: '#'
-        !entry.isPinned && firstChar >= bucket
+        !entry.isPinned && firstChar == bucket
     }
-    return if (exactOrAfter >= 0) exactOrAfter else entries.lastIndex
+    if (exactUnpinned >= 0) return exactUnpinned
+
+    // 2. First unpinned item with firstChar >= bucket
+    val nextUnpinned = entries.indexOfFirst { entry ->
+        val firstChar = entry.name.trimStart('.').firstOrNull()?.uppercaseChar() ?: '#'
+        !entry.isPinned && firstChar in 'A'..'Z' && firstChar >= bucket
+    }
+    if (nextUnpinned >= 0) return nextUnpinned
+
+    // 3. Fallback to any item (including pinned) starting with >= bucket, or last item
+    val anyMatch = entries.indexOfFirst { entry ->
+        val firstChar = entry.name.trimStart('.').firstOrNull()?.uppercaseChar() ?: '#'
+        firstChar >= bucket
+    }
+    return if (anyMatch >= 0) anyMatch else entries.lastIndex
 }
 
+/**
+ * Unified single-pointer-loop Fast-Scroll ASCII Index Rail using `rememberUpdatedState`
+ * so `onSelectChar` always reads the latest `paneState.filteredEntries` and scrolls live!
+ */
 @Composable
 private fun FastScrollAsciiRail(
     activeChar: Char?,
@@ -1071,6 +1213,8 @@ private fun FastScrollAsciiRail(
 ) {
     val palette = LocalPlainTextPalette.current
     var railHeightPx by remember { mutableFloatStateOf(1f) }
+    val currentOnSelectChar by rememberUpdatedState(onSelectChar)
+    val currentOnRelease by rememberUpdatedState(onRelease)
 
     fun charAtY(y: Float): Char {
         val fraction = (y / railHeightPx).coerceIn(0f, 0.999f)
@@ -1080,31 +1224,28 @@ private fun FastScrollAsciiRail(
 
     Column(
         modifier = Modifier
-            .width(13.dp)
+            .width(18.dp)
             .fillMaxHeight()
             .background(palette.backgroundDark)
+            .border(0.5.dp, palette.currentLine.copy(alpha = 0.5f))
             .onSizeChanged { sz ->
                 railHeightPx = sz.height.toFloat().coerceAtLeast(1f)
             }
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = { offset ->
-                        onSelectChar(charAtY(offset.y))
-                        tryAwaitRelease()
-                        onRelease()
-                    }
-                )
-            }
-            .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onDragStart = { offset -> onSelectChar(charAtY(offset.y)) },
-                    onVerticalDrag = { change, _ ->
-                        change.consume()
-                        onSelectChar(charAtY(change.position.y))
-                    },
-                    onDragEnd = { onRelease() },
-                    onDragCancel = { onRelease() }
-                )
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    currentOnSelectChar(charAtY(down.position.y))
+                    do {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull()
+                        if (change != null && change.pressed) {
+                            change.consume()
+                            currentOnSelectChar(charAtY(change.position.y))
+                        }
+                    } while (event.changes.any { it.pressed })
+                    currentOnRelease()
+                }
             }
             .padding(vertical = 1.dp),
         verticalArrangement = Arrangement.SpaceEvenly,
@@ -1116,8 +1257,8 @@ private fun FastScrollAsciiRail(
                 text = ch.toString(),
                 color = if (isHighlighted) palette.yellow else palette.comment,
                 fontFamily = FontFamily.Monospace,
-                fontWeight = if (isHighlighted) FontWeight.Bold else FontWeight.Normal,
-                fontSize = 7.5.sp,
+                fontWeight = if (isHighlighted) FontWeight.Bold else FontWeight.Medium,
+                fontSize = if (isHighlighted) 9.sp else 7.5.sp,
                 lineHeight = 8.sp,
                 textAlign = TextAlign.Center
             )
@@ -1418,6 +1559,12 @@ private fun CompactParentRow(
     }
 }
 
+/**
+ * File / Folder Row with full Visual & Haptic Gesture Feedback:
+ * - Dragging right slides the row right and reveals a Dracula Green `[✓ SELECT]` track
+ * - Dragging left slides the row left and reveals a Dracula Yellow `[★ PIN TOP]` track
+ * - Crossing the swipe threshold fires a crisp haptic tick so you feel the action arming
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CompactFileEntryRow(
@@ -1434,8 +1581,16 @@ private fun CompactFileEntryRow(
 ) {
     val palette = LocalPlainTextPalette.current
     val density = LocalDensity.current
-    val swipeThresholdPx = remember(density) { with(density) { 56.dp.toPx() } }
-    var dragAccumX by remember { mutableFloatStateOf(0f) }
+    val haptic = LocalHapticFeedback.current
+    val swipeThresholdPx = remember(density) { with(density) { 54.dp.toPx() } }
+    val maxSwipePx = remember(density) { with(density) { 108.dp.toPx() } }
+
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    var thresholdHapticFired by remember { mutableStateOf(false) }
+    val animatedOffsetX by animateFloatAsState(targetValue = dragOffsetX, label = "rowSwipeOffset")
+
+    val currentOnSwipeRight by rememberUpdatedState(onSwipeRightSelect)
+    val currentOnSwipeLeft by rememberUpdatedState(onSwipeLeftPin)
 
     val rowBg = when {
         isSelected -> palette.selection
@@ -1460,18 +1615,37 @@ private fun CompactFileEntryRow(
     val swipeModifier = if (settings.enableRowSwipeGesture) {
         Modifier.pointerInput(entry.uniqueKey) {
             detectHorizontalDragGestures(
-                onDragStart = { dragAccumX = 0f },
+                onDragStart = {
+                    dragOffsetX = 0f
+                    thresholdHapticFired = false
+                },
                 onHorizontalDrag = { change, dragAmount ->
                     change.consume()
-                    dragAccumX += dragAmount
+                    val next = (dragOffsetX + dragAmount).coerceIn(-maxSwipePx, maxSwipePx)
+                    dragOffsetX = next
+                    val crossed = abs(next) >= swipeThresholdPx
+                    if (crossed && !thresholdHapticFired) {
+                        thresholdHapticFired = true
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    } else if (!crossed && thresholdHapticFired) {
+                        thresholdHapticFired = false
+                    }
                 },
                 onDragEnd = {
-                    if (dragAccumX > swipeThresholdPx) {
-                        onSwipeRightSelect()
-                    } else if (dragAccumX < -swipeThresholdPx) {
-                        onSwipeLeftPin()
+                    val finalDrag = dragOffsetX
+                    dragOffsetX = 0f
+                    thresholdHapticFired = false
+                    if (finalDrag >= swipeThresholdPx) {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        currentOnSwipeRight()
+                    } else if (finalDrag <= -swipeThresholdPx) {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        currentOnSwipeLeft()
                     }
-                    dragAccumX = 0f
+                },
+                onDragCancel = {
+                    dragOffsetX = 0f
+                    thresholdHapticFired = false
                 }
             )
         }
@@ -1481,107 +1655,157 @@ private fun CompactFileEntryRow(
 
     val vPad = settings.rowDensity.verticalPaddingDp.dp
     val fontScale = settings.fontScale.scaleFactor
+    val isArmed = abs(dragOffsetX) >= swipeThresholdPx
 
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(rowBg)
-            .then(swipeModifier)
-            .combinedClickable(
-                onClick = onSingleTap,
-                onDoubleClick = onDoubleTap,
-                onLongClick = onLongPress
-            )
-            .padding(horizontal = 6.dp, vertical = vPad),
-        verticalAlignment = Alignment.CenterVertically
+            .background(palette.backgroundDark)
     ) {
-        if (showCheckbox) {
-            Text(
-                text = if (isSelected) "[x]" else "[ ]",
-                color = if (isSelected) palette.green else palette.comment,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = (11f * fontScale).sp,
-                modifier = Modifier
-                    .clickable(onClick = onSwipeRightSelect)
-                    .padding(end = 5.dp)
-            )
-        }
-
-        if (settings.showFileIcons) {
-            FileTypeIcon(
-                category = entry.category,
-                extension = entry.extension,
-                isPinned = entry.isPinned,
-                modifier = Modifier.padding(end = 6.dp)
-            )
-        } else {
-            Text(
-                text = if (entry.isPinned) "[★]" else entry.category.asciiBadge,
-                color = nameColor,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = (10.5f * fontScale).sp,
-                modifier = Modifier.padding(end = 5.dp)
-            )
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            val pinPrefix = if (entry.isPinned) "★ " else ""
-            val dirSuffix = if (entry.isDirectory) "/" else ""
-            Text(
-                text = "$pinPrefix${entry.name}$dirSuffix",
-                color = nameColor,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = if (entry.isDirectory || entry.isPinned) FontWeight.Bold else FontWeight.Normal,
-                fontSize = (12f * fontScale).sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (settings.showPermissionSubtitle || entry.isPinnedShortcutFromOtherDir) {
-                val subText = if (entry.isPinnedShortcutFromOtherDir) {
-                    "PINNED :: ${entry.path.substringBeforeLast('/')}"
+        // Underlying Visual Swipe Feedback Track
+        if (abs(animatedOffsetX) > 4f) {
+            val isRightSwipe = animatedOffsetX > 0f
+            val trackColor = if (isRightSwipe) {
+                palette.green.copy(alpha = if (isArmed) 0.30f else 0.14f)
+            } else {
+                palette.yellow.copy(alpha = if (isArmed) 0.30f else 0.14f)
+            }
+            val labelColor = if (isRightSwipe) palette.green else palette.yellow
+            val feedbackText = if (isRightSwipe) {
+                if (isArmed) {
+                    ">>> [✓ RELEASE TO ${if (isSelected) "UNSELECT" else "SELECT"}]"
                 } else {
-                    "${entry.permissions} | ${FileSystemRepository.formatShortDate(entry.lastModified)}"
+                    ">> SWIPE RIGHT: SELECT"
                 }
+            } else {
+                if (isArmed) {
+                    "[★ RELEASE TO ${if (entry.isPinned) "UNPIN" else "PIN TOP"}] <<<"
+                } else {
+                    "SWIPE LEFT: PIN TOP <<"
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(trackColor)
+                    .padding(horizontal = 10.dp),
+                horizontalArrangement = if (isRightSwipe) Arrangement.Start else Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = subText,
-                    color = palette.comment,
+                    text = feedbackText,
+                    color = labelColor,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = (9.5f * fontScale).sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    fontWeight = if (isArmed) FontWeight.Bold else FontWeight.Medium,
+                    fontSize = 10.5.sp
                 )
             }
         }
 
-        if (diffStatus != DiffStatus.NONE && diffStatus != DiffStatus.IDENTICAL) {
-            val badgeColor = when (diffStatus) {
-                DiffStatus.ONLY_IN_P1 -> palette.green
-                DiffStatus.ONLY_IN_P2 -> palette.cyan
-                DiffStatus.NEWER_HERE -> palette.orange
-                DiffStatus.OLDER_HERE -> palette.comment
-                DiffStatus.SIZE_DIFF -> palette.yellow
-                else -> palette.comment
+        // Foreground Sliding Row
+        Row(
+            modifier = Modifier
+                .offset { IntOffset(animatedOffsetX.roundToInt(), 0) }
+                .fillMaxWidth()
+                .background(rowBg)
+                .then(swipeModifier)
+                .combinedClickable(
+                    onClick = onSingleTap,
+                    onDoubleClick = onDoubleTap,
+                    onLongClick = onLongPress
+                )
+                .padding(horizontal = 6.dp, vertical = vPad),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (showCheckbox) {
+                Text(
+                    text = if (isSelected) "[x]" else "[ ]",
+                    color = if (isSelected) palette.green else palette.comment,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = (11f * fontScale).sp,
+                    modifier = Modifier
+                        .clickable(onClick = onSwipeRightSelect)
+                        .padding(end = 5.dp)
+                )
             }
+
+            if (settings.showFileIcons) {
+                FileTypeIcon(
+                    category = entry.category,
+                    extension = entry.extension,
+                    isPinned = entry.isPinned,
+                    modifier = Modifier.padding(end = 6.dp)
+                )
+            } else {
+                Text(
+                    text = if (entry.isPinned) "[★]" else entry.category.asciiBadge,
+                    color = nameColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = (10.5f * fontScale).sp,
+                    modifier = Modifier.padding(end = 5.dp)
+                )
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                val pinPrefix = if (entry.isPinned) "★ " else ""
+                val dirSuffix = if (entry.isDirectory) "/" else ""
+                Text(
+                    text = "$pinPrefix${entry.name}$dirSuffix",
+                    color = nameColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = if (entry.isDirectory || entry.isPinned) FontWeight.Bold else FontWeight.Normal,
+                    fontSize = (12f * fontScale).sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (settings.showPermissionSubtitle || entry.isPinnedShortcutFromOtherDir) {
+                    val subText = if (entry.isPinnedShortcutFromOtherDir) {
+                        "PINNED :: ${entry.path.substringBeforeLast('/')}"
+                    } else {
+                        "${entry.permissions} | ${FileSystemRepository.formatShortDate(entry.lastModified)}"
+                    }
+                    Text(
+                        text = subText,
+                        color = palette.comment,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = (9.5f * fontScale).sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (diffStatus != DiffStatus.NONE && diffStatus != DiffStatus.IDENTICAL) {
+                val badgeColor = when (diffStatus) {
+                    DiffStatus.ONLY_IN_P1 -> palette.green
+                    DiffStatus.ONLY_IN_P2 -> palette.cyan
+                    DiffStatus.NEWER_HERE -> palette.orange
+                    DiffStatus.OLDER_HERE -> palette.comment
+                    DiffStatus.SIZE_DIFF -> palette.yellow
+                    else -> palette.comment
+                }
+                Text(
+                    text = diffStatus.badge,
+                    color = badgeColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = (9.5f * fontScale).sp,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
             Text(
-                text = diffStatus.badge,
-                color = badgeColor,
+                text = sizeLabel,
+                color = if (entry.isDirectory) palette.comment else palette.yellow,
                 fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = (9.5f * fontScale).sp,
-                modifier = Modifier.padding(horizontal = 4.dp)
+                fontSize = (10.5f * fontScale).sp,
+                maxLines = 1
             )
         }
-
-        Spacer(modifier = Modifier.width(4.dp))
-
-        Text(
-            text = sizeLabel,
-            color = if (entry.isDirectory) palette.comment else palette.yellow,
-            fontFamily = FontFamily.Monospace,
-            fontSize = (10.5f * fontScale).sp,
-            maxLines = 1
-        )
     }
 }

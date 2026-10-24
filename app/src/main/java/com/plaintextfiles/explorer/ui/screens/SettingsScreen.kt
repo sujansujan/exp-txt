@@ -65,14 +65,14 @@ fun SettingsScreen(
                 onClick = { viewModel.closeSettingsScreen() }
             )
             Text(
-                text = "exp-txt :: SETTINGS",
+                text = "SETTINGS",
                 color = palette.purple,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp
             )
             Text(
-                text = "v1.7",
+                text = "v1.9",
                 color = palette.comment,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp
@@ -93,8 +93,11 @@ fun SettingsScreen(
                 title = "THEME & APPEARANCE",
                 titleColor = palette.purple
             ) {
-                SettingLabel("Color Theme (Official Dracula Spec)")
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                SettingLabel("Color Theme (Follow System / Dracula Dark / Alucard Light)")
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     ThemeMode.entries.forEach { mode ->
                         PlainTextActionLink(
                             label = mode.displayName,
@@ -155,9 +158,9 @@ fun SettingsScreen(
                 )
             }
 
-            // 2. Dual-Pane & Power Tools
+            // 2. Dual-Pane, Global Sort & Filter
             AsciiFramedSection(
-                title = "DUAL-PANE & COMPARE TOOLS",
+                title = "DUAL-PANE & GLOBAL SORT / FILTER",
                 titleColor = palette.cyan
             ) {
                 SettingLabel("Default Pane Layout")
@@ -178,6 +181,15 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
                 SettingToggleRow(
+                    title = "Global Sorts, Filters & Search Across Both Panes",
+                    checked = settings.globalSortAndFilter,
+                    onToggle = {
+                        viewModel.updateSettings { s -> s.copy(globalSortAndFilter = !s.globalSortAndFilter) }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                SettingToggleRow(
                     title = "Highlight P1 vs P2 Diff Badges ([+P1], [+P2], [~NEW])",
                     checked = settings.showDiffHighlights,
                     onToggle = {
@@ -193,25 +205,6 @@ fun SettingsScreen(
                         viewModel.updateSettings { s -> s.copy(rememberLastPaths = !s.rememberLastPaths) }
                     }
                 )
-
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Split Pane Ratio: ${(settings.splitRatio * 100).toInt()}% / ${100 - (settings.splitRatio * 100).toInt()}%",
-                        color = palette.foreground,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.5.sp
-                    )
-                    PlainTextActionLink(
-                        label = "RESET 50/50",
-                        accentColor = palette.orange,
-                        onClick = { viewModel.updateSplitRatio(0.50f) }
-                    )
-                }
             }
 
             // 3. Trash Bin, Pinned Items & Sorting
@@ -309,7 +302,7 @@ fun SettingsScreen(
 
             // 4. Navigation & Gestures
             AsciiFramedSection(
-                title = "GESTURES & FAST NAVIGATION",
+                title = "GESTURES & VISUAL FEEDBACK",
                 titleColor = palette.green
             ) {
                 SettingToggleRow(
@@ -324,7 +317,7 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(6.dp))
                 SettingToggleRow(
-                    title = "Swipe Row Gesture (Right = Select, Left = Pin)",
+                    title = "Swipe Row Gesture with Live Visual & Haptic Feedback",
                     checked = settings.enableRowSwipeGesture,
                     onToggle = {
                         viewModel.updateSettings { s ->
@@ -336,12 +329,13 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(6.dp))
                 AsciiDivider()
                 Spacer(modifier = Modifier.height(4.dp))
+                SettingGuideLine("• Swipe Right : Slides row & reveals green [SELECT] feedback bar")
+                SettingGuideLine("• Swipe Left  : Slides row & reveals yellow [★ PIN TOP] feedback bar")
                 SettingGuideLine("• Single Tap  : Open folder / archive, or open file in default Android app")
-                SettingGuideLine("• Double Tap  : Show File Details, Permissions & SHA/MD5 Hashes")
-                SettingGuideLine("• Hold (Long) : Copy, Cut, Paste, Pin, Compress, Extract, Rename, Trash/Delete")
-                SettingGuideLine("• Path [>_]   : Tap [>_] or hold path bar to type/paste raw path with auto-complete")
-                SettingGuideLine("• Index Rail  : Drag # A-Z rail on right edge to jump across large directories")
-                SettingGuideLine("• Share Target: Share files from any Android app to exp-txt to save or .zip")
+                SettingGuideLine("• Double Tap  : Haptic pulse + File Details, Permissions & SHA/MD5 Hashes")
+                SettingGuideLine("• Hold (Long) : Haptic pulse + Copy, Cut, Paste, Pin, Compress, Rename, Trash")
+                SettingGuideLine("• Index Rail  : Touch or slide # A-Z rail on right edge to auto-scroll live")
+                SettingGuideLine("• System Back : Works on active pane only and returns to Home (~) before exit")
             }
         }
     }

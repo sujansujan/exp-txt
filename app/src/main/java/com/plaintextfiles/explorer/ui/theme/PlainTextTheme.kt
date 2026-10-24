@@ -1,6 +1,7 @@
 package com.plaintextfiles.explorer.ui.theme
 
 import android.app.Activity
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -20,10 +21,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import com.plaintextfiles.explorer.model.ThemeMode
 
-/**
- * Official Dracula & Alucard Classic Color Palettes
- * Reference: https://draculatheme.com/spec
- */
 @Immutable
 data class PlainTextPalette(
     val mode: ThemeMode,
@@ -46,7 +43,6 @@ data class PlainTextPalette(
     val pink: Color
 )
 
-// Official Dracula Classic (Dark) Specification
 val DraculaPalette = PlainTextPalette(
     mode = ThemeMode.DRACULA,
     name = "Dracula",
@@ -68,7 +64,6 @@ val DraculaPalette = PlainTextPalette(
     pink = Color(0xFFFF79C6)
 )
 
-// Official Alucard Classic (Light) Specification
 val AlucardPalette = PlainTextPalette(
     mode = ThemeMode.ALUCARD,
     name = "Alucard",
@@ -125,7 +120,7 @@ val PlainTextTypography = Typography(
     ),
     bodySmall = TextStyle(
         fontFamily = FontFamily.Monospace,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontFamily.Normal,
         fontSize = 11.sp,
         lineHeight = 14.sp
     ),
@@ -142,7 +137,9 @@ fun PlainTextTheme(
     themeMode: ThemeMode,
     content: @Composable () -> Unit
 ) {
+    val systemDark = isSystemInDarkTheme()
     val palette = when (themeMode) {
+        ThemeMode.SYSTEM -> if (systemDark) DraculaPalette else AlucardPalette
         ThemeMode.DRACULA -> DraculaPalette
         ThemeMode.ALUCARD -> AlucardPalette
     }

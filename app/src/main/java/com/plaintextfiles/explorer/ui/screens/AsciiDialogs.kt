@@ -39,9 +39,14 @@ import androidx.compose.ui.window.DialogProperties
 import com.plaintextfiles.explorer.data.FileSystemRepository
 import com.plaintextfiles.explorer.model.ArchiveFormat
 import com.plaintextfiles.explorer.model.ClipboardMode
+import com.plaintextfiles.explorer.model.DateFilterPreset
 import com.plaintextfiles.explorer.model.FileDetailedInfo
 import com.plaintextfiles.explorer.model.FileEntry
+import com.plaintextfiles.explorer.model.FilterConfig
+import com.plaintextfiles.explorer.model.FilterTypeChip
 import com.plaintextfiles.explorer.model.PaneId
+import com.plaintextfiles.explorer.model.SizeFilterPreset
+import com.plaintextfiles.explorer.model.SortConfig
 import com.plaintextfiles.explorer.model.SortField
 import com.plaintextfiles.explorer.model.SortOrder
 import com.plaintextfiles.explorer.ui.ExplorerViewModel
@@ -207,21 +212,25 @@ fun DoubleTapFileDetailsModal(
                             details.crc32Hex?.let { crc ->
                                 AsciiMetadataRow("CRC-32", crc) {
                                     clipboardManager.setText(AnnotatedString(crc))
+                                    viewModel.showFeedback("Copied CRC-32 to clipboard")
                                 }
                             }
                             details.md5?.let { md5 ->
                                 AsciiMetadataRow("MD5", md5) {
                                     clipboardManager.setText(AnnotatedString(md5))
+                                    viewModel.showFeedback("Copied MD5 to clipboard")
                                 }
                             }
                             details.sha1?.let { sha1 ->
                                 AsciiMetadataRow("SHA-1", sha1) {
                                     clipboardManager.setText(AnnotatedString(sha1))
+                                    viewModel.showFeedback("Copied SHA-1 to clipboard")
                                 }
                             }
                             details.sha256?.let { sha256 ->
                                 AsciiMetadataRow("SHA-256", sha256) {
                                     clipboardManager.setText(AnnotatedString(sha256))
+                                    viewModel.showFeedback("Copied SHA-256 to clipboard")
                                 }
                             }
                         }
@@ -232,7 +241,10 @@ fun DoubleTapFileDetailsModal(
                         PlainTextActionLink(
                             label = "COPY PATH",
                             accentColor = palette.cyan,
-                            onClick = { clipboardManager.setText(AnnotatedString(entry.path)) }
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(entry.path))
+                                viewModel.showFeedback("Copied path to clipboard")
+                            }
                         )
                         PlainTextActionLink(
                             label = "ACTIONS...",
@@ -342,12 +354,372 @@ fun ActivePlainDialogHost(
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.93f)
+                .fillMaxWidth(0.94f)
                 .background(palette.background)
                 .border(1.5.dp, palette.cyan)
                 .padding(10.dp)
         ) {
             when (dialogState) {
+                is PlainDialogState.SortAndFilterModal -> {
+                    val pane = uiState.getPane(dialogState.paneId)
+                    var applyGlobally by remember { mutableStateOf(uiState.settings.globalSortAndFilter) }
+                    var stagedField by remember { mutableStateOf(pane.sortConfig.field) }
+                    var stagedOrder by remember { mutableStateOf(pane.sortConfig.order) }
+                    var stagedFoldersFirst by remember { mutableStateOf(pane.sortConfig.foldersFirst) }
+                    var stagedShowHidden by remember { mutableStateOf(pane.sortConfig.showHidden) }
+
+                    var stagedTypes by remember { mutableStateOf(pane.filterConfig.selectedTypes) }
+                    var stagedSize by remember { mutableStateOf(pane.filterConfig.sizePreset) }
+                    var stagedDate by remember { mutableStateOf(pane.filterConfig.datePreset) }
+                    var stagedKeyword by remember { mutableStateOf(pane.filterConfig.extensionOrKeyword) }
+                    var stagedOnlyPinned by remember { mutableStateOf(pane.filterConfig.onlyPinned) }
+
+                    val stagedFilterConfig = FilterConfig(
+                        selectedTypes = stagedTypes,
+                        sizePreset = stagedSize,
+                        datePreset = stagedDate,
+                        extensionOrKeyword = stagedKeyword,
+                        onlyPinned = stagedOnlyPinned
+                    )
+                    val stagedSortConfig = SortConfig(
+                        field = stagedField,
+                        order = stagedOrder,
+                        foldersFirst = stagedFoldersFirst,
+                        showHidden = stagedShowHidden
+                    )
+
+                    val previewMatchesCount = remember(
+                        pane.entries,
+                        pane.searchQuery,
+                        stagedFilterConfig
+                    ) {
+                        viewModel.applyAllFilters(pane.entries, pane.searchQuery, stagedFilterConfig).size
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "+-- [SORT & FILTER STUDIO] --+",
+                                color = palette.yellow,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            PlainTextActionLink(
+                                label = "X",
+                                accentColor = palette.red,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                        }
+                        AsciiDivider(char = '=', color = palette.yellow)
+
+                        Text(
+                            text = "Select multiple sorts & filters below, then tap [APPLY] at the bottom.",
+                            color = palette.comment,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+
+                        // 1. Scope: Global vs Active Pane Only
+                        Text(
+                            text = "1. APPLY SCOPE:",
+                            color = palette.cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PlainTextActionLink(
+                                label = "GLOBAL (BOTH PANES P1 & P2)",
+                                isActive = applyGlobally,
+                                accentColor = palette.green,
+                                onClick = { applyGlobally = true }
+                            )
+                            PlainTextActionLink(
+                                label = "ONLY ${dialogState.paneId.shortCode}",
+                                isActive = !applyGlobally,
+                                accentColor = palette.cyan,
+                                onClick = { applyGlobally = false }
+                            )
+                        }
+
+                        AsciiDivider()
+
+                        // 2. Sort Field & Direction
+                        Text(
+                            text = "2. SORT BY FIELD & ORDER:",
+                            color = palette.cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            SortField.entries.forEach { field ->
+                                PlainTextActionLink(
+                                    label = field.label,
+                                    isActive = stagedField == field,
+                                    accentColor = palette.yellow,
+                                    onClick = { stagedField = field }
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PlainTextActionLink(
+                                label = "ASCENDING (^)",
+                                isActive = stagedOrder == SortOrder.ASCENDING,
+                                accentColor = palette.cyan,
+                                onClick = { stagedOrder = SortOrder.ASCENDING }
+                            )
+                            PlainTextActionLink(
+                                label = "DESCENDING (v)",
+                                isActive = stagedOrder == SortOrder.DESCENDING,
+                                accentColor = palette.cyan,
+                                onClick = { stagedOrder = SortOrder.DESCENDING }
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PlainTextActionLink(
+                                label = "FOLDERS FIRST: ${if (stagedFoldersFirst) "ON" else "OFF"}",
+                                isActive = stagedFoldersFirst,
+                                accentColor = palette.purple,
+                                onClick = { stagedFoldersFirst = !stagedFoldersFirst }
+                            )
+                            PlainTextActionLink(
+                                label = "DOTFILES (.hidden): ${if (stagedShowHidden) "ON" else "OFF"}",
+                                isActive = stagedShowHidden,
+                                accentColor = palette.purple,
+                                onClick = { stagedShowHidden = !stagedShowHidden }
+                            )
+                        }
+
+                        AsciiDivider()
+
+                        // 3. Multi-Select Category Filters
+                        Text(
+                            text = "3. FILE TYPE FILTERS (MULTI-SELECT):",
+                            color = palette.cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            PlainTextActionLink(
+                                label = "ALL TYPES",
+                                isActive = stagedTypes.isEmpty() && !stagedOnlyPinned,
+                                accentColor = palette.green,
+                                onClick = {
+                                    stagedTypes = emptySet()
+                                    stagedOnlyPinned = false
+                                }
+                            )
+                            PlainTextActionLink(
+                                label = "★ PINNED ONLY",
+                                isActive = stagedOnlyPinned,
+                                accentColor = palette.yellow,
+                                onClick = { stagedOnlyPinned = !stagedOnlyPinned }
+                            )
+                            FilterTypeChip.entries.forEach { chip ->
+                                val selected = chip in stagedTypes
+                                PlainTextActionLink(
+                                    label = "${chip.label} (${chip.shortTag})",
+                                    isActive = selected,
+                                    accentColor = palette.orange,
+                                    onClick = {
+                                        val next = stagedTypes.toMutableSet()
+                                        if (!next.add(chip)) {
+                                            next.remove(chip)
+                                        }
+                                        stagedTypes = next
+                                    }
+                                )
+                            }
+                        }
+
+                        // 4. Size Filter Presets
+                        Text(
+                            text = "4. FILE SIZE FILTER:",
+                            color = palette.cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            SizeFilterPreset.entries.forEach { preset ->
+                                PlainTextActionLink(
+                                    label = preset.label,
+                                    isActive = stagedSize == preset,
+                                    accentColor = palette.pink,
+                                    onClick = { stagedSize = preset }
+                                )
+                            }
+                        }
+
+                        // 5. Modified Date Filter Presets
+                        Text(
+                            text = "5. MODIFIED TIME FILTER:",
+                            color = palette.cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            DateFilterPreset.entries.forEach { preset ->
+                                PlainTextActionLink(
+                                    label = preset.label,
+                                    isActive = stagedDate == preset,
+                                    accentColor = palette.purple,
+                                    onClick = { stagedDate = preset }
+                                )
+                            }
+                        }
+
+                        // 6. Optional Extension / Name Keyword
+                        AsciiTextField(
+                            value = stagedKeyword,
+                            onValueChange = { stagedKeyword = it },
+                            label = "6. EXTENSION OR NAME KEYWORD (e.g. pdf, mp4, report)"
+                        )
+
+                        AsciiDivider(char = '=')
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            PlainTextActionLink(
+                                label = "RESET ALL",
+                                accentColor = palette.orange,
+                                onClick = {
+                                    stagedField = SortField.NAME
+                                    stagedOrder = SortOrder.ASCENDING
+                                    stagedFoldersFirst = true
+                                    stagedTypes = emptySet()
+                                    stagedSize = SizeFilterPreset.ANY
+                                    stagedDate = DateFilterPreset.ANY
+                                    stagedKeyword = ""
+                                    stagedOnlyPinned = false
+                                }
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                PlainTextActionLink(
+                                    label = "CANCEL",
+                                    accentColor = palette.comment,
+                                    onClick = { viewModel.dismissDialog() }
+                                )
+                                PlainTextActionLink(
+                                    label = "APPLY ($previewMatchesCount)",
+                                    isActive = true,
+                                    accentColor = palette.green,
+                                    onClick = {
+                                        viewModel.applySortAndFilterBatch(
+                                            targetPaneId = dialogState.paneId,
+                                            applyGlobally = applyGlobally,
+                                            newSort = stagedSortConfig,
+                                            newFilter = stagedFilterConfig
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                is PlainDialogState.QuickCreateModal -> {
+                    var createFolder by remember { mutableStateOf(true) }
+                    var itemName by remember { mutableStateOf("new_folder") }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "+-- [CREATE IN ${dialogState.paneId.shortCode}] --+",
+                                color = palette.purple,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            PlainTextActionLink(
+                                label = "X",
+                                accentColor = palette.red,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                        }
+                        AsciiDivider()
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PlainTextActionLink(
+                                label = "NEW FOLDER",
+                                isActive = createFolder,
+                                accentColor = palette.cyan,
+                                onClick = {
+                                    createFolder = true
+                                    if (itemName == "new_file.txt") itemName = "new_folder"
+                                }
+                            )
+                            PlainTextActionLink(
+                                label = "NEW EMPTY FILE",
+                                isActive = !createFolder,
+                                accentColor = palette.green,
+                                onClick = {
+                                    createFolder = false
+                                    if (itemName == "new_folder") itemName = "new_file.txt"
+                                }
+                            )
+                        }
+                        AsciiTextField(
+                            value = itemName,
+                            onValueChange = { itemName = it },
+                            label = if (createFolder) "FOLDER NAME" else "FILE NAME"
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            PlainTextActionLink(
+                                label = "CANCEL",
+                                accentColor = palette.comment,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                            PlainTextActionLink(
+                                label = "CREATE",
+                                isActive = true,
+                                accentColor = palette.green,
+                                onClick = {
+                                    if (createFolder) {
+                                        viewModel.createNewFolder(dialogState.paneId, itemName)
+                                    } else {
+                                        viewModel.createNewFile(dialogState.paneId, itemName)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
                 is PlainDialogState.ItemActionMenu -> {
                     val entries = dialogState.entries
                     val first = entries.firstOrNull() ?: return@Box
@@ -683,7 +1055,7 @@ fun ActivePlainDialogHost(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "+-- [SHARE TO exp-txt :: $countLabel] --+",
+                                text = "+-- [INCOMING SHARE :: $countLabel] --+",
                                 color = palette.green,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
@@ -776,70 +1148,6 @@ fun ActivePlainDialogHost(
                                 compressToZip = true,
                                 zipBaseName = zipBase
                             )
-                        }
-                    }
-                }
-
-                is PlainDialogState.SortModal -> {
-                    val pane = uiState.getPane(dialogState.paneId)
-                    val currentSort = pane.sortConfig
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "+-- [SORT ${dialogState.paneId.label}] --+",
-                                color = palette.yellow,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                            PlainTextActionLink(
-                                label = "CLOSE",
-                                accentColor = palette.comment,
-                                onClick = { viewModel.dismissDialog() }
-                            )
-                        }
-                        AsciiDivider()
-                        Text(
-                            text = "Pinned items are always kept at the top of the main list.",
-                            color = palette.comment,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.5.sp
-                        )
-                        SortField.entries.forEach { field ->
-                            val isSelected = currentSort.field == field
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(if (isSelected) palette.selection else Color.Transparent)
-                                    .clickable {
-                                        val nextOrder = if (isSelected) currentSort.order.toggle() else currentSort.order
-                                        viewModel.updateSortConfig(dialogState.paneId, field, nextOrder)
-                                        viewModel.dismissDialog()
-                                    }
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = "${if (isSelected) "* " else "  "}${field.label}",
-                                    color = if (isSelected) palette.yellow else palette.foreground,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    fontSize = 12.sp
-                                )
-                                if (isSelected) {
-                                    Text(
-                                        text = "${currentSort.order.label} (${currentSort.order.symbol})",
-                                        color = palette.cyan,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp
-                                    )
-                                }
-                            }
                         }
                     }
                 }

@@ -1,6 +1,7 @@
 package com.plaintextfiles.explorer.model
 
 enum class ThemeMode(val displayName: String) {
+    SYSTEM("Follow System"),
     DRACULA("Dracula (Dark)"),
     ALUCARD("Alucard (Light)")
 }
@@ -25,7 +26,7 @@ enum class FontScalePreset(val label: String, val scaleFactor: Float) {
 }
 
 data class AppSettings(
-    val themeMode: ThemeMode = ThemeMode.DRACULA,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dualPaneMode: DualPaneMode = DualPaneMode.SPLIT_VERTICAL,
     val rowDensity: RowDensity = RowDensity.COMPACT,
     val fontScale: FontScalePreset = FontScalePreset.NORMAL,
@@ -34,12 +35,12 @@ data class AppSettings(
     val foldersFirst: Boolean = true,
     val showHidden: Boolean = false,
     val globalPinnedAtTop: Boolean = true,
+    val globalSortAndFilter: Boolean = true,
     val rememberLastPaths: Boolean = true,
     val enableRowSwipeGesture: Boolean = true,
     val showFastScrollRail: Boolean = true,
     val useTrashBin: Boolean = true,
-    val showDiffHighlights: Boolean = false,
-    val splitRatio: Float = 0.50f
+    val showDiffHighlights: Boolean = false
 )
 
 enum class PaneId(val index: Int, val label: String, val shortCode: String) {
@@ -70,6 +71,60 @@ data class SortConfig(
     val foldersFirst: Boolean = true,
     val showHidden: Boolean = false
 )
+
+enum class FilterTypeChip(val label: String, val shortTag: String) {
+    FOLDERS("Folders", "DIR"),
+    FILES_ONLY("Files Only", "FIL"),
+    ARCHIVES("Archives", "ARC"),
+    IMAGES("Images", "IMG"),
+    VIDEO("Video", "VID"),
+    AUDIO("Audio", "AUD"),
+    DOCUMENTS("Docs/PDF", "DOC"),
+    CODE_TEXT("Text/Code", "TXT"),
+    PACKAGES("APK", "APK")
+}
+
+enum class SizeFilterPreset(val label: String, val minBytes: Long, val maxBytes: Long?) {
+    ANY("Any Size", 0L, null),
+    UNDER_1MB("< 1 MB", 0L, 1024L * 1024L),
+    OVER_1MB("> 1 MB", 1024L * 1024L, null),
+    OVER_10MB("> 10 MB", 10L * 1024L * 1024L, null),
+    OVER_100MB("> 100 MB", 100L * 1024L * 1024L, null)
+}
+
+enum class DateFilterPreset(val label: String, val maxAgeMillis: Long?) {
+    ANY("Any Time", null),
+    LAST_24H("24 Hours", 24L * 3600L * 1000L),
+    LAST_7D("7 Days", 7L * 24L * 3600L * 1000L),
+    LAST_30D("30 Days", 30L * 24L * 3600L * 1000L)
+}
+
+data class FilterConfig(
+    val selectedTypes: Set<FilterTypeChip> = emptySet(),
+    val sizePreset: SizeFilterPreset = SizeFilterPreset.ANY,
+    val datePreset: DateFilterPreset = DateFilterPreset.ANY,
+    val extensionOrKeyword: String = "",
+    val onlyPinned: Boolean = false
+) {
+    val activeCount: Int
+        get() = selectedTypes.size +
+            (if (sizePreset != SizeFilterPreset.ANY) 1 else 0) +
+            (if (datePreset != DateFilterPreset.ANY) 1 else 0) +
+            (if (extensionOrKeyword.isNotBlank()) 1 else 0) +
+            (if (onlyPinned) 1 else 0)
+
+    val isActive: Boolean get() = activeCount > 0
+
+    fun toSummaryString(): String {
+        val parts = mutableListOf<String>()
+        if (onlyPinned) parts.add("★PIN")
+        selectedTypes.forEach { parts.add(it.shortTag) }
+        if (sizePreset != SizeFilterPreset.ANY) parts.add(sizePreset.label.replace(" ", ""))
+        if (datePreset != DateFilterPreset.ANY) parts.add(datePreset.label.replace(" ", ""))
+        if (extensionOrKeyword.isNotBlank()) parts.add("'${extensionOrKeyword.trim()}'")
+        return parts.joinToString("+")
+    }
+}
 
 enum class ArchiveFormat(
     val displayName: String,
@@ -250,6 +305,7 @@ data class PaneState(
     val filteredEntries: List<FileEntry> = emptyList(),
     val selectedKeys: Set<String> = emptySet(),
     val sortConfig: SortConfig = SortConfig(),
+    val filterConfig: FilterConfig = FilterConfig(),
     val searchQuery: String = "",
     val isSearchVisible: Boolean = false,
     val isPathEditorVisible: Boolean = false,

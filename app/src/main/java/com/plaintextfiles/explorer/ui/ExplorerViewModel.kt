@@ -11,16 +11,21 @@ import com.plaintextfiles.explorer.model.AppSettings
 import com.plaintextfiles.explorer.model.ArchiveFormat
 import com.plaintextfiles.explorer.model.ClipboardBuffer
 import com.plaintextfiles.explorer.model.ClipboardMode
+import com.plaintextfiles.explorer.model.DateFilterPreset
 import com.plaintextfiles.explorer.model.DiffStatus
 import com.plaintextfiles.explorer.model.DualPaneMode
 import com.plaintextfiles.explorer.model.FileDetailedInfo
 import com.plaintextfiles.explorer.model.FileEntry
+import com.plaintextfiles.explorer.model.FilterConfig
+import com.plaintextfiles.explorer.model.FilterTypeChip
 import com.plaintextfiles.explorer.model.FontScalePreset
 import com.plaintextfiles.explorer.model.PaneComparisonSummary
 import com.plaintextfiles.explorer.model.PaneId
 import com.plaintextfiles.explorer.model.PaneState
+import com.plaintextfiles.explorer.model.PlainFileCategory
 import com.plaintextfiles.explorer.model.RowDensity
 import com.plaintextfiles.explorer.model.SharedIncomingItem
+import com.plaintextfiles.explorer.model.SizeFilterPreset
 import com.plaintextfiles.explorer.model.SortConfig
 import com.plaintextfiles.explorer.model.SortField
 import com.plaintextfiles.explorer.model.SortOrder
@@ -36,7 +41,8 @@ import java.io.File
 
 sealed interface PlainDialogState {
     data class ItemActionMenu(val paneId: PaneId, val entries: List<FileEntry>) : PlainDialogState
-    data class SortModal(val paneId: PaneId) : PlainDialogState
+    data class SortAndFilterModal(val paneId: PaneId) : PlainDialogState
+    data class QuickCreateModal(val paneId: PaneId) : PlainDialogState
     data object ComparePanesModal : PlainDialogState
     data class IncomingShareModal(
         val items: List<SharedIncomingItem>,
@@ -94,12 +100,14 @@ data class ExplorerUiState(
 
 class ExplorerViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val prefs = application.getSharedPreferences("exp_txt_prefs_v7", Context.MODE_PRIVATE)
+    private val prefs = application.getSharedPreferences("exp_txt_prefs_v9", Context.MODE_PRIVATE)
     val fileRepo = FileSystemRepository(application.applicationContext)
     val archiveEngine = ArchiveEngine(fileRepo)
 
     private val _uiState = MutableStateFlow(ExplorerUiState())
     val uiState: StateFlow<ExplorerUiState> = _uiState.asStateFlow()
+
+    private var lastBackAtHomeMillis: Long = 0L
 
     init {
         val loadedSettings = loadSettingsFromPrefs()
@@ -119,9 +127,14 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             defaultDownload
         }
 
+        val savedSortField = prefs.getString("sort_field", SortField.NAME.name)
+            ?.let { runCatching { SortField.valueOf(it) }.getOrNull() } ?: SortField.NAME
+        val savedSortOrder = prefs.getString("sort_order", SortOrder.ASCENDING.name)
+            ?.let { runCatching { SortOrder.valueOf(it) }.getOrNull() } ?: SortOrder.ASCENDING
+
         val initialSort = SortConfig(
-            field = SortField.NAME,
-            order = SortOrder.ASCENDING,
+            field = savedSortField,
+            order = savedSortOrder,
             foldersFirst = loadedSettings.foldersFirst,
             showHidden = loadedSettings.showHidden
         )
@@ -142,8 +155,8 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun loadSettingsFromPrefs(): AppSettings {
-        val theme = prefs.getString("theme_mode", ThemeMode.DRACULA.name)
-            ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.DRACULA
+        val theme = prefs.getString("theme_mode", ThemeMode.SYSTEM.name)
+            ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM
         val layout = prefs.getString("dual_pane_mode", DualPaneMode.SPLIT_VERTICAL.name)
             ?.let { runCatching { DualPaneMode.valueOf(it) }.getOrNull() } ?: DualPaneMode.SPLIT_VERTICAL
         val density = prefs.getString("row_density", RowDensity.COMPACT.name)
@@ -161,12 +174,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             foldersFirst = prefs.getBoolean("folders_first", true),
             showHidden = prefs.getBoolean("show_hidden", false),
             globalPinnedAtTop = prefs.getBoolean("global_pinned_at_top", true),
+            globalSortAndFilter = prefs.getBoolean("global_sort_and_filter", true),
             rememberLastPaths = prefs.getBoolean("remember_last_paths", true),
             enableRowSwipeGesture = prefs.getBoolean("enable_row_swipe", true),
             showFastScrollRail = prefs.getBoolean("show_fast_scroll_rail", true),
             useTrashBin = prefs.getBoolean("use_trash_bin", true),
-            showDiffHighlights = prefs.getBoolean("show_diff_highlights", false),
-            splitRatio = prefs.getFloat("split_ratio", 0.50f).coerceIn(0.22f, 0.78f)
+            showDiffHighlights = prefs.getBoolean("show_diff_highlights", false)
         )
     }
 
@@ -182,12 +195,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             .putBoolean("folders_first", next.foldersFirst)
             .putBoolean("show_hidden", next.showHidden)
             .putBoolean("global_pinned_at_top", next.globalPinnedAtTop)
+            .putBoolean("global_sort_and_filter", next.globalSortAndFilter)
             .putBoolean("remember_last_paths", next.rememberLastPaths)
             .putBoolean("enable_row_swipe", next.enableRowSwipeGesture)
             .putBoolean("show_fast_scroll_rail", next.showFastScrollRail)
             .putBoolean("use_trash_bin", next.useTrashBin)
             .putBoolean("show_diff_highlights", next.showDiffHighlights)
-            .putFloat("split_ratio", next.splitRatio.coerceIn(0.22f, 0.78f))
             .apply()
 
         _uiState.update { state ->
@@ -211,10 +224,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         reloadPane(PaneId.PANE_B)
     }
 
-    fun updateSplitRatio(newRatio: Float) {
-        val clamped = newRatio.coerceIn(0.22f, 0.78f)
-        prefs.edit().putFloat("split_ratio", clamped).apply()
-        _uiState.update { it.copy(settings = it.settings.copy(splitRatio = clamped)) }
+    fun showFeedback(message: String) {
+        _uiState.update { it.copy(toastMessage = message) }
+    }
+
+    fun clearFeedback() {
+        _uiState.update { it.copy(toastMessage = null) }
     }
 
     fun openSettingsScreen() {
@@ -248,6 +263,109 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     fun setActivePane(paneId: PaneId) {
         if (_uiState.value.activePaneId != paneId) {
             _uiState.update { it.copy(activePaneId = paneId) }
+        }
+    }
+
+    fun toggleActivePane() {
+        val next = _uiState.value.activePaneId.opposite()
+        _uiState.update {
+            it.copy(
+                activePaneId = next,
+                toastMessage = "Active pane: ${next.label} (${next.shortCode})"
+            )
+        }
+    }
+
+    // =========================================================================
+    // Unified Multi-Filter & Multi-Sort Studio (With Global Option)
+    // =========================================================================
+    fun applySortAndFilterBatch(
+        targetPaneId: PaneId,
+        applyGlobally: Boolean,
+        newSort: SortConfig,
+        newFilter: FilterConfig
+    ) {
+        prefs.edit()
+            .putBoolean("global_sort_and_filter", applyGlobally)
+            .putString("sort_field", newSort.field.name)
+            .putString("sort_order", newSort.order.name)
+            .putBoolean("folders_first", newSort.foldersFirst)
+            .putBoolean("show_hidden", newSort.showHidden)
+            .apply()
+
+        _uiState.update { state ->
+            val updatedSettings = state.settings.copy(
+                globalSortAndFilter = applyGlobally,
+                foldersFirst = newSort.foldersFirst,
+                showHidden = newSort.showHidden
+            )
+            if (applyGlobally) {
+                state.copy(
+                    settings = updatedSettings,
+                    activeDialog = null,
+                    paneA = state.paneA.copy(sortConfig = newSort, filterConfig = newFilter),
+                    paneB = state.paneB.copy(sortConfig = newSort, filterConfig = newFilter),
+                    toastMessage = "Applied Sort & Filter globally (P1 & P2)"
+                )
+            } else {
+                val nextA = if (targetPaneId == PaneId.PANE_A) {
+                    state.paneA.copy(sortConfig = newSort, filterConfig = newFilter)
+                } else {
+                    state.paneA
+                }
+                val nextB = if (targetPaneId == PaneId.PANE_B) {
+                    state.paneB.copy(sortConfig = newSort, filterConfig = newFilter)
+                } else {
+                    state.paneB
+                }
+                state.copy(
+                    settings = updatedSettings,
+                    activeDialog = null,
+                    paneA = nextA,
+                    paneB = nextB,
+                    toastMessage = "Applied Sort & Filter to ${targetPaneId.shortCode}"
+                )
+            }
+        }
+
+        if (applyGlobally) {
+            reloadPane(PaneId.PANE_A)
+            reloadPane(PaneId.PANE_B)
+        } else {
+            reloadPane(targetPaneId)
+        }
+    }
+
+    fun clearFiltersForPane(paneId: PaneId) {
+        val global = _uiState.value.settings.globalSortAndFilter
+        if (global) {
+            _uiState.update { state ->
+                state.copy(
+                    paneA = state.paneA.copy(
+                        filterConfig = FilterConfig(),
+                        searchQuery = "",
+                        isSearchVisible = false,
+                        filteredEntries = applyAllFilters(state.paneA.entries, "", FilterConfig())
+                    ),
+                    paneB = state.paneB.copy(
+                        filterConfig = FilterConfig(),
+                        searchQuery = "",
+                        isSearchVisible = false,
+                        filteredEntries = applyAllFilters(state.paneB.entries, "", FilterConfig())
+                    ),
+                    toastMessage = "Cleared all filters (P1 & P2)"
+                )
+            }
+        } else {
+            updatePaneState(paneId) { pane ->
+                pane.copy(
+                    filterConfig = FilterConfig(),
+                    searchQuery = "",
+                    isSearchVisible = false,
+                    filteredEntries = applyAllFilters(pane.entries, "", FilterConfig())
+                )
+            }
+            showFeedback("Cleared filters in ${paneId.shortCode}")
         }
     }
 
@@ -287,7 +405,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         val keys = uniqueItems.map { it.uniqueKey }.toSet()
         updatePaneState(paneId) { it.copy(selectedKeys = keys) }
         setActivePane(paneId)
-        _uiState.update { it.copy(activeDialog = null) }
+        _uiState.update {
+            it.copy(
+                activeDialog = null,
+                toastMessage = "Selected ${keys.size} unique item(s) in ${paneId.shortCode}"
+            )
+        }
     }
 
     fun syncMissingAndNewer(sourcePaneId: PaneId) {
@@ -495,9 +618,36 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             it.copy(
                 pinnedPaths = currentPins,
                 activeDialog = null,
-                toastMessage = if (added) "Pinned [${entry.name}] to top of list" else "Unpinned [${entry.name}]"
+                toastMessage = if (added) "★ Pinned '${entry.name}' to top" else "☆ Unpinned '${entry.name}'"
             )
         }
+        reloadPane(PaneId.PANE_A)
+        reloadPane(PaneId.PANE_B)
+    }
+
+    fun pinSelectedInPane(paneId: PaneId) {
+        val pane = _uiState.value.getPane(paneId)
+        val selectedEntries = pane.entries.filter { it.uniqueKey in pane.selectedKeys && !it.isVirtualArchiveEntry }
+        if (selectedEntries.isEmpty()) return
+        val currentPins = _uiState.value.pinnedPaths.toMutableSet()
+        val allAlreadyPinned = selectedEntries.all { it.path in currentPins }
+        if (allAlreadyPinned) {
+            selectedEntries.forEach { currentPins.remove(it.path) }
+        } else {
+            selectedEntries.forEach { currentPins.add(it.path) }
+        }
+        prefs.edit().putStringSet("pinned_paths", currentPins).apply()
+        _uiState.update {
+            it.copy(
+                pinnedPaths = currentPins,
+                toastMessage = if (allAlreadyPinned) {
+                    "☆ Unpinned ${selectedEntries.size} item(s)"
+                } else {
+                    "★ Pinned ${selectedEntries.size} item(s) to top"
+                }
+            )
+        }
+        clearSelection(paneId)
         reloadPane(PaneId.PANE_A)
         reloadPane(PaneId.PANE_B)
     }
@@ -574,7 +724,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             result.fold(
                 onSuccess = { items ->
                     updatePaneState(paneId) { pane ->
-                        val filtered = filterBySearch(items, pane.searchQuery)
+                        val filtered = applyAllFilters(items, pane.searchQuery, pane.filterConfig)
                         pane.copy(
                             currentPath = targetPath,
                             entries = items,
@@ -636,7 +786,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             result.fold(
                 onSuccess = { virtualItems ->
                     updatePaneState(paneId) { pane ->
-                        val filtered = filterBySearch(virtualItems, pane.searchQuery)
+                        val filtered = applyAllFilters(virtualItems, pane.searchQuery, pane.filterConfig)
                         pane.copy(
                             activeArchivePath = archivePath,
                             activeArchiveInternalDir = internalDir.trim('/'),
@@ -698,10 +848,21 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         val currentFile = File(pane.currentPath)
         val parent = currentFile.parentFile
         if (parent != null && parent.exists() && pane.currentPath != internalRoot) {
-            loadPaneDirectory(paneId, parent.absolutePath, recordHistory = true)
+            val nextPath = if (parent.absolutePath.startsWith(internalRoot)) {
+                parent.absolutePath
+            } else {
+                internalRoot
+            }
+            loadPaneDirectory(paneId, nextPath, recordHistory = true)
         }
     }
 
+    /**
+     * System Back Gesture:
+     * - Operates strictly on whichever pane is currently active (`activePaneId`)
+     * - Always navigates the active pane back to the Home section (`/storage/emulated/0`)
+     *   before allowing the app to close.
+     */
     fun navigateBackOnSystemPress(): Boolean {
         val s = _uiState.value
         if (s.detailsEntry != null) {
@@ -716,10 +877,13 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             closeSettingsScreen()
             return true
         }
+
         val activeId = s.activePaneId
         val pane = s.getPane(activeId)
+
         if (pane.selectedKeys.isNotEmpty()) {
             clearSelection(activeId)
+            showFeedback("Cleared selection in ${activeId.shortCode}")
             return true
         }
         if (pane.isPathEditorVisible) {
@@ -728,6 +892,10 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
         if (pane.isSearchVisible || pane.searchQuery.isNotEmpty()) {
             setPaneSearchVisible(activeId, false)
+            return true
+        }
+        if (pane.filterConfig.isActive) {
+            clearFiltersForPane(activeId)
             return true
         }
         if (pane.activeArchivePath != null) {
@@ -745,6 +913,32 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             } else {
                 loadPaneDirectory(activeId, prevDir, recordHistory = false)
             }
+            return true
+        }
+
+        // If back stack is empty, ensure the active pane returns to Home (~) before closing the app
+        val internalRoot = fileRepo.internalStorageRoot()
+        if (pane.currentPath != internalRoot) {
+            val parent = File(pane.currentPath).parentFile
+            val targetPath = if (parent != null &&
+                parent.exists() &&
+                parent.absolutePath.startsWith(internalRoot) &&
+                parent.absolutePath != pane.currentPath
+            ) {
+                parent.absolutePath
+            } else {
+                internalRoot
+            }
+            loadPaneDirectory(activeId, targetPath, recordHistory = false)
+            showFeedback("${activeId.shortCode}: Back to ${if (targetPath == internalRoot) "Home (~)" else targetPath.substringAfterLast('/')}")
+            return true
+        }
+
+        // Active pane is now at Home (~). Require double-back within 2.2s to close app.
+        val now = System.currentTimeMillis()
+        if (now - lastBackAtHomeMillis > 2200L) {
+            lastBackAtHomeMillis = now
+            showFeedback("At Home (~) in ${activeId.shortCode} — press Back again to exit")
             return true
         }
         return false
@@ -825,7 +1019,8 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 detailsPaneId = paneId,
                 detailsEntry = entry,
                 detailsInfo = null,
-                isLoadingDetails = true
+                isLoadingDetails = true,
+                toastMessage = "Inspecting '${entry.name}'"
             )
         }
         viewModelScope.launch {
@@ -885,13 +1080,27 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun toggleSelection(paneId: PaneId, entry: FileEntry) {
+    fun toggleSelection(paneId: PaneId, entry: FileEntry, fromSwipe: Boolean = false) {
+        var nowSelected = false
         updatePaneState(paneId) { pane ->
             val next = pane.selectedKeys.toMutableSet()
-            if (!next.add(entry.uniqueKey)) {
+            if (next.add(entry.uniqueKey)) {
+                nowSelected = true
+            } else {
                 next.remove(entry.uniqueKey)
+                nowSelected = false
             }
             pane.copy(selectedKeys = next)
+        }
+        if (fromSwipe) {
+            val totalSel = _uiState.value.getPane(paneId).selectedKeys.size
+            showFeedback(
+                if (nowSelected) {
+                    "✓ Selected '${entry.name}' ($totalSel selected)"
+                } else {
+                    "Unselected '${entry.name}' ($totalSel selected)"
+                }
+            )
         }
     }
 
@@ -908,34 +1117,56 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setPaneSearchVisible(paneId: PaneId, visible: Boolean) {
-        updatePaneState(paneId) { pane ->
-            val nextQuery = if (!visible) "" else pane.searchQuery
-            pane.copy(
-                isSearchVisible = visible,
-                searchQuery = nextQuery,
-                filteredEntries = filterBySearch(pane.entries, nextQuery)
-            )
+        val global = _uiState.value.settings.globalSortAndFilter
+        if (global && !visible) {
+            _uiState.update { state ->
+                state.copy(
+                    paneA = state.paneA.copy(
+                        isSearchVisible = false,
+                        searchQuery = "",
+                        filteredEntries = applyAllFilters(state.paneA.entries, "", state.paneA.filterConfig)
+                    ),
+                    paneB = state.paneB.copy(
+                        isSearchVisible = false,
+                        searchQuery = "",
+                        filteredEntries = applyAllFilters(state.paneB.entries, "", state.paneB.filterConfig)
+                    )
+                )
+            }
+        } else {
+            updatePaneState(paneId) { pane ->
+                val nextQuery = if (!visible) "" else pane.searchQuery
+                pane.copy(
+                    isSearchVisible = visible,
+                    searchQuery = nextQuery,
+                    filteredEntries = applyAllFilters(pane.entries, nextQuery, pane.filterConfig)
+                )
+            }
         }
     }
 
     fun updateSearchQuery(paneId: PaneId, query: String) {
-        updatePaneState(paneId) { pane ->
-            pane.copy(
-                searchQuery = query,
-                filteredEntries = filterBySearch(pane.entries, query)
-            )
-        }
-    }
-
-    fun updateSortConfig(paneId: PaneId, field: SortField, order: SortOrder) {
-        updatePaneState(paneId) { pane ->
-            val nextCfg = pane.sortConfig.copy(field = field, order = order)
-            val sorted = fileRepo.sortEntries(pane.entries, nextCfg)
-            pane.copy(
-                sortConfig = nextCfg,
-                entries = sorted,
-                filteredEntries = filterBySearch(sorted, pane.searchQuery)
-            )
+        val global = _uiState.value.settings.globalSortAndFilter
+        if (global) {
+            _uiState.update { state ->
+                state.copy(
+                    paneA = state.paneA.copy(
+                        searchQuery = query,
+                        filteredEntries = applyAllFilters(state.paneA.entries, query, state.paneA.filterConfig)
+                    ),
+                    paneB = state.paneB.copy(
+                        searchQuery = query,
+                        filteredEntries = applyAllFilters(state.paneB.entries, query, state.paneB.filterConfig)
+                    )
+                )
+            }
+        } else {
+            updatePaneState(paneId) { pane ->
+                pane.copy(
+                    searchQuery = query,
+                    filteredEntries = applyAllFilters(pane.entries, query, pane.filterConfig)
+                )
+            }
         }
     }
 
@@ -952,6 +1183,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         } else {
             loadPaneDirectory(targetPaneId, sourcePane.currentPath)
         }
+        showFeedback("Mirrored ${sourcePaneId.shortCode} -> ${targetPaneId.shortCode}")
     }
 
     fun swapPanes() {
@@ -960,7 +1192,8 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 paneA = currentB.copy(paneId = PaneId.PANE_A),
-                paneB = currentA.copy(paneId = PaneId.PANE_B)
+                paneB = currentA.copy(paneId = PaneId.PANE_B),
+                toastMessage = "Swapped Pane 1 <-> Pane 2"
             )
         }
         refreshPaneComparison()
@@ -979,7 +1212,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             fileRepo.createFolder(path, folderName).fold(
                 onSuccess = {
-                    _uiState.update { it.copy(activeDialog = null) }
+                    _uiState.update {
+                        it.copy(
+                            activeDialog = null,
+                            toastMessage = "Created folder '$folderName'"
+                        )
+                    }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
@@ -995,7 +1233,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             fileRepo.createEmptyFile(path, fileName).fold(
                 onSuccess = {
-                    _uiState.update { it.copy(activeDialog = null) }
+                    _uiState.update {
+                        it.copy(
+                            activeDialog = null,
+                            toastMessage = "Created file '$fileName'"
+                        )
+                    }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
@@ -1010,7 +1253,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             fileRepo.renameEntry(entry, newName).fold(
                 onSuccess = {
-                    _uiState.update { it.copy(activeDialog = null) }
+                    _uiState.update {
+                        it.copy(
+                            activeDialog = null,
+                            toastMessage = "Renamed to '$newName'"
+                        )
+                    }
                     clearSelection(paneId)
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
@@ -1101,11 +1349,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 fileRepo.deleteEntries(entries) { cur, tot, msg ->
                     _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
                 }.fold(
-                    onSuccess = {
+                    onSuccess = { count ->
                         _uiState.update {
                             it.copy(
                                 transferProgress = null,
-                                trashItemCount = fileRepo.getTrashItemCount()
+                                trashItemCount = fileRepo.getTrashItemCount(),
+                                toastMessage = "Deleted $count item(s) permanently"
                             )
                         }
                         clearSelection(paneId)
@@ -1154,8 +1403,13 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             fileRepo.copyOrMoveEntries(entries, targetPane.currentPath, move) { cur, tot, msg ->
                 _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
             }.fold(
-                onSuccess = {
-                    _uiState.update { it.copy(transferProgress = null) }
+                onSuccess = { count ->
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            toastMessage = "${if (move) "Moved" else "Copied"} $count item(s) -> ${targetPaneId.shortCode}"
+                        )
+                    }
                     clearSelection(sourcePaneId)
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
@@ -1175,14 +1429,15 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 clipboard = ClipboardBuffer(entries = realEntries, sourcePane = paneId, mode = mode),
-                activeDialog = null
+                activeDialog = null,
+                toastMessage = "${if (mode == ClipboardMode.MOVE) "Cut" else "Copied"} ${realEntries.size} item(s) to clipboard"
             )
         }
         clearSelection(paneId)
     }
 
     fun clearClipboard() {
-        _uiState.update { it.copy(clipboard = null) }
+        _uiState.update { it.copy(clipboard = null, toastMessage = "Clipboard cleared") }
     }
 
     fun pasteClipboardIntoPane(targetPaneId: PaneId) {
@@ -1200,11 +1455,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             fileRepo.copyOrMoveEntries(clip.entries, destPath, isMove) { cur, tot, msg ->
                 _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
             }.fold(
-                onSuccess = {
+                onSuccess = { count ->
                     _uiState.update {
                         it.copy(
                             transferProgress = null,
-                            clipboard = if (isMove) null else it.clipboard
+                            clipboard = if (isMove) null else it.clipboard,
+                            toastMessage = "Pasted $count item(s) into ${targetPaneId.shortCode}"
                         )
                     }
                     reloadPane(PaneId.PANE_A)
@@ -1291,8 +1547,13 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             ) { cur, tot, msg ->
                 _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
             }.fold(
-                onSuccess = {
-                    _uiState.update { it.copy(transferProgress = null) }
+                onSuccess = { outFile ->
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            toastMessage = "Created ${outFile.name}"
+                        )
+                    }
                     clearSelection(paneId)
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
@@ -1333,8 +1594,13 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             ) { cur, tot, msg ->
                 _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
             }.fold(
-                onSuccess = {
-                    _uiState.update { it.copy(transferProgress = null) }
+                onSuccess = { count ->
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            toastMessage = "Extracted $count item(s)"
+                        )
+                    }
                     reloadPane(PaneId.PANE_A)
                     reloadPane(PaneId.PANE_B)
                 },
@@ -1366,10 +1632,66 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    private fun filterBySearch(entries: List<FileEntry>, query: String): List<FileEntry> {
-        val clean = query.trim()
-        if (clean.isEmpty()) return entries
-        return entries.filter { it.name.contains(clean, ignoreCase = true) }
+    /**
+     * Applies both quick search query and multi-criteria FilterConfig to entries.
+     */
+    fun applyAllFilters(
+        entries: List<FileEntry>,
+        searchQuery: String,
+        filterConfig: FilterConfig
+    ): List<FileEntry> {
+        val cleanSearch = searchQuery.trim()
+        val cleanKeyword = filterConfig.extensionOrKeyword.trim()
+        val now = System.currentTimeMillis()
+
+        if (cleanSearch.isEmpty() && !filterConfig.isActive) {
+            return entries
+        }
+
+        return entries.filter { entry ->
+            if (cleanSearch.isNotEmpty() && !entry.name.contains(cleanSearch, ignoreCase = true)) {
+                return@filter false
+            }
+            if (cleanKeyword.isNotEmpty() &&
+                !entry.name.contains(cleanKeyword, ignoreCase = true) &&
+                !entry.extension.equals(cleanKeyword.removePrefix("."), ignoreCase = true)
+            ) {
+                return@filter false
+            }
+            if (filterConfig.onlyPinned && !entry.isPinned) {
+                return@filter false
+            }
+            if (filterConfig.selectedTypes.isNotEmpty()) {
+                val matchesAnyType = filterConfig.selectedTypes.any { chip ->
+                    when (chip) {
+                        FilterTypeChip.FOLDERS -> entry.isDirectory
+                        FilterTypeChip.FILES_ONLY -> !entry.isDirectory
+                        FilterTypeChip.ARCHIVES -> entry.category == PlainFileCategory.ARCHIVE
+                        FilterTypeChip.IMAGES -> entry.category == PlainFileCategory.IMAGE
+                        FilterTypeChip.VIDEO -> entry.category == PlainFileCategory.VIDEO
+                        FilterTypeChip.AUDIO -> entry.category == PlainFileCategory.AUDIO
+                        FilterTypeChip.DOCUMENTS -> entry.category == PlainFileCategory.DOCUMENT
+                        FilterTypeChip.CODE_TEXT -> entry.category == PlainFileCategory.TEXT_CODE
+                        FilterTypeChip.PACKAGES -> entry.category == PlainFileCategory.PACKAGE
+                    }
+                }
+                if (!matchesAnyType) return@filter false
+            }
+            if (filterConfig.sizePreset != SizeFilterPreset.ANY) {
+                if (entry.isDirectory) return@filter false
+                val minB = filterConfig.sizePreset.minBytes
+                val maxB = filterConfig.sizePreset.maxBytes
+                if (entry.size < minB) return@filter false
+                if (maxB != null && entry.size > maxB) return@filter false
+            }
+            if (filterConfig.datePreset != DateFilterPreset.ANY) {
+                val maxAge = filterConfig.datePreset.maxAgeMillis
+                if (maxAge != null && (now - entry.lastModified) > maxAge) {
+                    return@filter false
+                }
+            }
+            true
+        }
     }
 
     private fun updatePaneState(paneId: PaneId, transform: (PaneState) -> PaneState) {
