@@ -570,12 +570,16 @@ fun ActivePlainDialogHost(
                             )
                         } else {
                             Text(
-                                text = "P1: ${summary.paneAPath}
-P2: ${summary.paneBPath}",
+                                text = "P1: ${summary.paneAPath}",
                                 color = palette.comment,
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 10.sp,
-                                lineHeight = 14.sp
+                                fontSize = 10.sp
+                            )
+                            Text(
+                                text = "P2: ${summary.paneBPath}",
+                                color = palette.comment,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
                             )
                             AsciiDivider()
 
@@ -712,7 +716,7 @@ P2: ${summary.paneBPath}",
                         }
                         if (dialogState.items.isEmpty() && !dialogState.sharedText.isNullOrBlank()) {
                             Text(
-                                text = " "${dialogState.sharedText.take(120)}"",
+                                text = " '${dialogState.sharedText.take(120)}'",
                                 color = palette.yellow,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 10.5.sp

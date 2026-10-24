@@ -336,26 +336,27 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(6.dp))
                 AsciiDivider()
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "• Single Tap  : Open folder / archive, or open file in default Android app
-" +
-                        "• Double Tap  : Show File Details, Permissions & SHA/MD5 Hashes
-" +
-                        "• Hold (Long) : Copy, Cut, Paste, Pin, Compress, Extract, Rename, Trash/Delete
-" +
-                        "• Path [>_]   : Tap [>_] or hold path bar to type/paste raw path with auto-complete
-" +
-                        "• Index Rail  : Drag # A-Z rail on right edge to jump across large directories
-" +
-                        "• Share Target: Share files from any Android app to exp-txt to save or .zip",
-                    color = palette.comment,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp
-                )
+                SettingGuideLine("• Single Tap  : Open folder / archive, or open file in default Android app")
+                SettingGuideLine("• Double Tap  : Show File Details, Permissions & SHA/MD5 Hashes")
+                SettingGuideLine("• Hold (Long) : Copy, Cut, Paste, Pin, Compress, Extract, Rename, Trash/Delete")
+                SettingGuideLine("• Path [>_]   : Tap [>_] or hold path bar to type/paste raw path with auto-complete")
+                SettingGuideLine("• Index Rail  : Drag # A-Z rail on right edge to jump across large directories")
+                SettingGuideLine("• Share Target: Share files from any Android app to exp-txt to save or .zip")
             }
         }
     }
+}
+
+@Composable
+private fun SettingGuideLine(text: String) {
+    val palette = LocalPlainTextPalette.current
+    Text(
+        text = text,
+        color = palette.comment,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 11.sp,
+        lineHeight = 15.sp
+    )
 }
 
 @Composable
