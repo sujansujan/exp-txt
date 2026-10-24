@@ -458,6 +458,7 @@ class FileSystemRepository(private val context: Context) {
             f.setReadable(readable, false)
             f.setWritable(writable, false)
             f.setExecutable(executable, false)
+            Unit
         }
     }
 
