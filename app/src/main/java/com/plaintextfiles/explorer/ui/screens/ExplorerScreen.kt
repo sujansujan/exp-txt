@@ -7,11 +7,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,11 +27,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.unit.Velocity
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -49,19 +45,27 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.plaintextfiles.explorer.data.FileSystemRepository
 import com.plaintextfiles.explorer.model.AppSettings
+import com.plaintextfiles.explorer.model.DiffStatus
 import com.plaintextfiles.explorer.model.DualPaneMode
 import com.plaintextfiles.explorer.model.FileEntry
 import com.plaintextfiles.explorer.model.PaneId
@@ -77,6 +81,11 @@ import com.plaintextfiles.explorer.ui.theme.LocalPlainTextPalette
 import kotlinx.coroutines.launch
 import java.io.File
 
+private val FAST_SCROLL_BUCKETS = listOf(
+    '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
+)
+
 @Composable
 fun ExplorerScreen(
     viewModel: ExplorerViewModel,
@@ -91,6 +100,7 @@ fun ExplorerScreen(
         SettingsScreen(
             settings = state.settings,
             pinnedCount = state.pinnedPaths.size,
+            trashCount = state.trashItemCount,
             viewModel = viewModel
         )
         return
@@ -162,7 +172,6 @@ fun ExplorerScreen(
                     totalHeightPx = sz.height.toFloat().coerceAtLeast(1f)
                 }
         ) {
-
             when (state.settings.dualPaneMode) {
                 DualPaneMode.SPLIT_VERTICAL -> {
                     Column(modifier = Modifier.fillMaxSize()) {
@@ -170,6 +179,7 @@ fun ExplorerScreen(
                             paneState = state.paneA,
                             isFocused = state.activePaneId == PaneId.PANE_A,
                             settings = state.settings,
+                            diffBadges = state.diffBadges,
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
@@ -183,12 +193,14 @@ fun ExplorerScreen(
                                 viewModel.updateSplitRatio(nextRatio)
                             },
                             onDoubleTapReset = { viewModel.updateSplitRatio(0.50f) },
+                            onComparePanes = { viewModel.openComparePanesModal() },
                             onSwapPanes = { viewModel.swapPanes() }
                         )
                         CompactFilePane(
                             paneState = state.paneB,
                             isFocused = state.activePaneId == PaneId.PANE_B,
                             settings = state.settings,
+                            diffBadges = state.diffBadges,
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
@@ -204,6 +216,7 @@ fun ExplorerScreen(
                             paneState = state.paneA,
                             isFocused = state.activePaneId == PaneId.PANE_A,
                             settings = state.settings,
+                            diffBadges = state.diffBadges,
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
@@ -221,6 +234,7 @@ fun ExplorerScreen(
                             paneState = state.paneB,
                             isFocused = state.activePaneId == PaneId.PANE_B,
                             settings = state.settings,
+                            diffBadges = state.diffBadges,
                             viewModel = viewModel,
                             onOpenExternalFile = onOpenExternalFile,
                             modifier = Modifier
@@ -243,7 +257,6 @@ fun ExplorerScreen(
                     }
 
                     Column(modifier = Modifier.fillMaxSize()) {
-                        // Ultra-compact 1-line Pager Tab Strip
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -288,6 +301,7 @@ fun ExplorerScreen(
                                 paneState = paneState,
                                 isFocused = true,
                                 settings = state.settings,
+                                diffBadges = state.diffBadges,
                                 viewModel = viewModel,
                                 onOpenExternalFile = onOpenExternalFile,
                                 modifier = Modifier.fillMaxSize()
@@ -301,6 +315,7 @@ fun ExplorerScreen(
                         paneState = activePane,
                         isFocused = true,
                         settings = state.settings,
+                        diffBadges = state.diffBadges,
                         viewModel = viewModel,
                         onOpenExternalFile = onOpenExternalFile,
                         modifier = Modifier.fillMaxSize()
@@ -309,7 +324,48 @@ fun ExplorerScreen(
             }
         }
 
-        // 5. Auto-Hiding 1-Line Bottom Progress Strip (Only visible during active file/archive operations)
+        // 5. Auto-Hiding 1-Line Trash Undo Bar (Appears after moving items to Trash)
+        state.trashUndoBatch?.let { batch ->
+            AsciiDivider(char = '-')
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.backgroundDark)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = batch.summaryLabel,
+                    color = palette.yellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    PlainTextActionLink(
+                        label = "UNDO",
+                        accentColor = palette.green,
+                        onClick = { viewModel.undoLastTrash() }
+                    )
+                    PlainTextActionLink(
+                        label = "TRASH",
+                        accentColor = palette.cyan,
+                        onClick = { viewModel.openTrashInActivePane() }
+                    )
+                    PlainTextActionLink(
+                        label = "X",
+                        accentColor = palette.comment,
+                        onClick = { viewModel.dismissTrashUndoBanner() }
+                    )
+                }
+            }
+        }
+
+        // 6. Auto-Hiding 1-Line Bottom Progress Strip (Only visible during active file/archive operations)
         state.transferProgress?.let { prog ->
             AsciiDivider(char = '=')
             Row(
@@ -341,7 +397,7 @@ fun ExplorerScreen(
         )
     }
 
-    // Long-Press Operations Menu & Other Dialogs
+    // Long-Press Operations Menu, Compare & Sync, Share Target & Other Dialogs
     state.activeDialog?.let { dlg ->
         ActivePlainDialogHost(
             dialogState = dlg,
@@ -353,9 +409,6 @@ fun ExplorerScreen(
     }
 }
 
-/**
- * Single-row Compact Top Bar with contextual Paste/Selection badges and the `[⋮]` 3-dot menu.
- */
 @Composable
 private fun CompactTopBarWithThreeDotMenu(
     state: ExplorerUiState,
@@ -373,7 +426,6 @@ private fun CompactTopBarWithThreeDotMenu(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Left: App Title + Active Pane Indicator
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -394,9 +446,20 @@ private fun CompactTopBarWithThreeDotMenu(
                     viewModel.showDialog(PlainDialogState.SortModal(activePane.paneId))
                 }
             )
+            if (state.settings.showDiffHighlights) {
+                Text(
+                    text = "[DIFF]",
+                    color = palette.cyan,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    modifier = Modifier.clickable {
+                        viewModel.openComparePanesModal()
+                    }
+                )
+            }
         }
 
-        // Right: Contextual Selection / Paste + Filter + 3-Dot Menu `[⋮]`
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -427,7 +490,6 @@ private fun CompactTopBarWithThreeDotMenu(
                 )
             }
 
-            // 3-Dot Menu Container
             Box {
                 PlainTextActionLink(
                     label = "⋮",
@@ -442,6 +504,18 @@ private fun CompactTopBarWithThreeDotMenu(
                         .background(palette.backgroundDark)
                         .border(1.dp, palette.currentLine)
                 ) {
+                    ThreeDotMenuItem("Compare & Sync Panes (P1 <-> P2)...") {
+                        menuExpanded = false
+                        viewModel.openComparePanesModal()
+                    }
+                    ThreeDotMenuItem("Diff Badges: ${if (state.settings.showDiffHighlights) "ON (Hide)" else "OFF (Show)"}") {
+                        menuExpanded = false
+                        viewModel.toggleDiffHighlights()
+                    }
+                    ThreeDotMenuItem("Edit Raw Path (${activePane.paneId.shortCode}) [>_]") {
+                        menuExpanded = false
+                        viewModel.setPathEditorVisible(activePane.paneId, !activePane.isPathEditorVisible)
+                    }
                     ThreeDotMenuItem("Sort By... (${activePane.sortConfig.field.shortTag} ${activePane.sortConfig.order.symbol})") {
                         menuExpanded = false
                         viewModel.showDialog(PlainDialogState.SortModal(activePane.paneId))
@@ -485,9 +559,13 @@ private fun CompactTopBarWithThreeDotMenu(
                         menuExpanded = false
                         viewModel.swapPanes()
                     }
-                    ThreeDotMenuItem("Sync Other Pane (${activePane.paneId.shortCode} -> ${activePane.paneId.opposite().shortCode})") {
+                    ThreeDotMenuItem("Mirror Folder (${activePane.paneId.shortCode} -> ${activePane.paneId.opposite().shortCode})") {
                         menuExpanded = false
                         viewModel.syncOppositePaneTo(activePane.paneId)
+                    }
+                    ThreeDotMenuItem("Trash Bin (${state.trashItemCount})") {
+                        menuExpanded = false
+                        viewModel.openTrashInActivePane()
                     }
                     ThreeDotMenuItem("Refresh") {
                         menuExpanded = false
@@ -619,16 +697,13 @@ private fun CompactPagerTab(
     }
 }
 
-/**
- * Draggable horizontal divider between Top and Bottom panes in SPLIT_VERTICAL mode.
- * Double-tap resets split ratio to 50/50.
- */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DraggableHorizontalSplitBar(
     activePaneId: PaneId,
     onDragDeltaPx: (Float) -> Unit,
     onDoubleTapReset: () -> Unit,
+    onComparePanes: () -> Unit,
     onSwapPanes: () -> Unit
 ) {
     val palette = LocalPlainTextPalette.current
@@ -652,7 +727,7 @@ private fun DraggableHorizontalSplitBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = "ACTIVE: ${activePaneId.shortCode}",
+            text = "ACTIVE:${activePaneId.shortCode}",
             color = palette.purple,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
@@ -664,20 +739,27 @@ private fun DraggableHorizontalSplitBar(
             fontFamily = FontFamily.Monospace,
             fontSize = 9.5.sp
         )
-        Text(
-            text = "[SWAP]",
-            color = palette.orange,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            fontSize = 9.5.sp,
-            modifier = Modifier.clickable(onClick = onSwapPanes)
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "[DIFF]",
+                color = palette.cyan,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.5.sp,
+                modifier = Modifier.clickable(onClick = onComparePanes)
+            )
+            Text(
+                text = "[SWAP]",
+                color = palette.orange,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.5.sp,
+                modifier = Modifier.clickable(onClick = onSwapPanes)
+            )
+        }
     }
 }
 
-/**
- * Draggable vertical divider between Left and Right panes in SPLIT_HORIZONTAL mode.
- */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DraggableVerticalSplitBar(
@@ -713,14 +795,12 @@ private fun DraggableVerticalSplitBar(
     }
 }
 
-/**
- * Ultra-compact File Pane with 1-line breadcrumb header and high-density file list.
- */
 @Composable
 fun CompactFilePane(
     paneState: PaneState,
     isFocused: Boolean,
     settings: AppSettings,
+    diffBadges: Map<String, DiffStatus>,
     viewModel: ExplorerViewModel,
     onOpenExternalFile: (File) -> Unit,
     modifier: Modifier = Modifier
@@ -729,10 +809,14 @@ fun CompactFilePane(
     val context = LocalContext.current
     val paneId = paneState.paneId
     val internalRoot = remember { viewModel.fileRepo.internalStorageRoot() }
+    val isInTrash = viewModel.fileRepo.isTrashPath(paneState.currentPath)
     val hasMultiSelect = paneState.selectedKeys.isNotEmpty()
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     var pullDistancePx by remember { mutableFloatStateOf(0f) }
     val pullTriggerPx = with(LocalDensity.current) { 72.dp.toPx() }
+    var activeFastScrollLetter by remember { mutableStateOf<Char?>(null) }
+    val hasParentRow = paneState.currentPath != internalRoot || paneState.isInsideArchive
 
     val pullRefreshConnection = remember(paneId, listState) {
         object : NestedScrollConnection {
@@ -780,11 +864,11 @@ fun CompactFilePane(
                 onClick = { viewModel.setActivePane(paneId) }
             )
     ) {
-        // Single-line Compact Pane Header: `*P1 | [..] / > storage > Download | 64.2 GB`
         CompactPaneHeaderRow(
             paneState = paneState,
             isFocused = isFocused,
             internalRoot = internalRoot,
+            isInTrash = isInTrash,
             onNavigateToPath = { path ->
                 viewModel.setActivePane(paneId)
                 viewModel.loadPaneDirectory(paneId, path)
@@ -792,6 +876,13 @@ fun CompactFilePane(
             onNavigateUp = {
                 viewModel.setActivePane(paneId)
                 viewModel.navigateUpInPane(paneId)
+            },
+            onTogglePathEditor = {
+                viewModel.setActivePane(paneId)
+                viewModel.setPathEditorVisible(paneId, !paneState.isPathEditorVisible)
+            },
+            onEmptyTrash = {
+                viewModel.emptyTrashBin()
             },
             onExitArchive = {
                 viewModel.setActivePane(paneId)
@@ -802,6 +893,14 @@ fun CompactFilePane(
             char = '-',
             color = if (isFocused) palette.purple.copy(alpha = 0.7f) else palette.comment.copy(alpha = 0.4f)
         )
+
+        // Tap/Hold-to-Edit Raw Path Bar with Subfolder Auto-Complete
+        if (paneState.isPathEditorVisible) {
+            RawPathEditorBar(
+                paneState = paneState,
+                viewModel = viewModel
+            )
+        }
 
         if (pullDistancePx > 12f || paneState.isLoading) {
             Text(
@@ -821,94 +920,325 @@ fun CompactFilePane(
             )
         }
 
-        // File & Folder List
-        LazyColumn(
-            state = listState,
+        // Main File List + Right-Edge Fast-Scroll ASCII Index Rail
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            // Compact `[..]` parent row when inside a subfolder or virtual archive
-            if (paneState.currentPath != internalRoot || paneState.isInsideArchive) {
-                item(key = "..parent_row..") {
-                    CompactParentRow(
-                        isInsideArchive = paneState.isInsideArchive,
-                        settings = settings,
-                        onNavigateUp = {
-                            viewModel.setActivePane(paneId)
-                            viewModel.navigateUpInPane(paneId)
+            Row(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                ) {
+                    if (hasParentRow) {
+                        item(key = "..parent_row..") {
+                            CompactParentRow(
+                                isInsideArchive = paneState.isInsideArchive,
+                                settings = settings,
+                                onNavigateUp = {
+                                    viewModel.setActivePane(paneId)
+                                    viewModel.navigateUpInPane(paneId)
+                                }
+                            )
+                            AsciiDivider()
+                        }
+                    }
+
+                    if (paneState.errorMessage != null) {
+                        item(key = "..error_row..") {
+                            Text(
+                                text = "! ${paneState.errorMessage}",
+                                color = palette.red,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    } else if (!paneState.isLoading && paneState.filteredEntries.isEmpty()) {
+                        item(key = "..empty_row..") {
+                            Text(
+                                text = if (isInTrash) "  (Trash Bin is empty)" else "  (Empty folder)",
+                                color = palette.comment,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    } else {
+                        items(
+                            items = paneState.filteredEntries,
+                            key = { it.uniqueKey }
+                        ) { entry ->
+                            val isSelected = entry.uniqueKey in paneState.selectedKeys
+                            val diffStatus = if (settings.showDiffHighlights) {
+                                diffBadges[entry.uniqueKey] ?: DiffStatus.NONE
+                            } else {
+                                DiffStatus.NONE
+                            }
+                            CompactFileEntryRow(
+                                entry = entry,
+                                isSelected = isSelected,
+                                showCheckbox = hasMultiSelect,
+                                diffStatus = diffStatus,
+                                settings = settings,
+                                onSingleTap = {
+                                    viewModel.onSingleTapEntry(
+                                        paneId = paneId,
+                                        entry = entry,
+                                        cacheDir = context.cacheDir,
+                                        onLaunchExternalFile = onOpenExternalFile
+                                    )
+                                },
+                                onDoubleTap = {
+                                    viewModel.onDoubleTapEntry(paneId, entry)
+                                },
+                                onLongPress = {
+                                    viewModel.onLongPressEntry(paneId, entry)
+                                },
+                                onSwipeRightSelect = {
+                                    viewModel.toggleSelection(paneId, entry)
+                                },
+                                onSwipeLeftPin = {
+                                    viewModel.togglePinEntry(entry)
+                                }
+                            )
+                            AsciiDivider()
+                        }
+                    }
+                }
+
+                // Razor-thin Fast-Scroll ASCII Index Rail (`# A-Z`)
+                if (settings.showFastScrollRail && paneState.filteredEntries.size >= 8) {
+                    FastScrollAsciiRail(
+                        activeChar = activeFastScrollLetter,
+                        onSelectChar = { targetChar ->
+                            activeFastScrollLetter = targetChar
+                            val offset = if (hasParentRow) 1 else 0
+                            val targetIdx = findIndexForBucket(paneState.filteredEntries, targetChar)
+                            if (targetIdx >= 0) {
+                                coroutineScope.launch {
+                                    listState.scrollToItem(targetIdx + offset)
+                                }
+                            }
+                        },
+                        onRelease = {
+                            activeFastScrollLetter = null
                         }
                     )
-                    AsciiDivider()
                 }
             }
 
-            if (paneState.errorMessage != null) {
-                item(key = "..error_row..") {
+            // Floating ASCII Fast-Scroll Letter Indicator (`+-- [ M ] --+`)
+            activeFastScrollLetter?.let { ch ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .background(palette.backgroundDark)
+                        .border(1.5.dp, palette.purple)
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
                     Text(
-                        text = "! ${paneState.errorMessage}",
-                        color = palette.red,
+                        text = "+-- [ $ch ] --+",
+                        color = palette.yellow,
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(8.dp)
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
                     )
-                }
-            } else if (!paneState.isLoading && paneState.filteredEntries.isEmpty()) {
-                item(key = "..empty_row..") {
-                    Text(
-                        text = "  (Empty folder)",
-                        color = palette.comment,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(8.dp)
-                    )
-                }
-            } else {
-                items(
-                    items = paneState.filteredEntries,
-                    key = { it.uniqueKey }
-                ) { entry ->
-                    val isSelected = entry.uniqueKey in paneState.selectedKeys
-                    CompactFileEntryRow(
-                        entry = entry,
-                        isSelected = isSelected,
-                        showCheckbox = hasMultiSelect,
-                        settings = settings,
-                        onSingleTap = {
-                            viewModel.onSingleTapEntry(
-                                paneId = paneId,
-                                entry = entry,
-                                cacheDir = context.cacheDir,
-                                onLaunchExternalFile = onOpenExternalFile
-                            )
-                        },
-                        onDoubleTap = {
-                            viewModel.onDoubleTapEntry(paneId, entry)
-                        },
-                        onLongPress = {
-                            viewModel.onLongPressEntry(paneId, entry)
-                        },
-                        onSwipeRightSelect = {
-                            viewModel.toggleSelection(paneId, entry)
-                        },
-                        onSwipeLeftPin = {
-                            viewModel.togglePinEntry(entry)
-                        }
-                    )
-                    AsciiDivider()
                 }
             }
         }
     }
 }
 
+private fun findIndexForBucket(entries: List<FileEntry>, bucket: Char): Int {
+    if (entries.isEmpty()) return -1
+    if (bucket == '#') return 0
+    val exactOrAfter = entries.indexOfFirst { entry ->
+        val firstChar = entry.name.trimStart('.').firstOrNull()?.uppercaseChar() ?: '#'
+        !entry.isPinned && firstChar >= bucket
+    }
+    return if (exactOrAfter >= 0) exactOrAfter else entries.lastIndex
+}
+
+@Composable
+private fun FastScrollAsciiRail(
+    activeChar: Char?,
+    onSelectChar: (Char) -> Unit,
+    onRelease: () -> Unit
+) {
+    val palette = LocalPlainTextPalette.current
+    var railHeightPx by remember { mutableFloatStateOf(1f) }
+
+    fun charAtY(y: Float): Char {
+        val fraction = (y / railHeightPx).coerceIn(0f, 0.999f)
+        val idx = (fraction * FAST_SCROLL_BUCKETS.size).toInt().coerceIn(0, FAST_SCROLL_BUCKETS.lastIndex)
+        return FAST_SCROLL_BUCKETS[idx]
+    }
+
+    Column(
+        modifier = Modifier
+            .width(13.dp)
+            .fillMaxHeight()
+            .background(palette.backgroundDark)
+            .onSizeChanged { sz ->
+                railHeightPx = sz.height.toFloat().coerceAtLeast(1f)
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = { offset ->
+                        onSelectChar(charAtY(offset.y))
+                        tryAwaitRelease()
+                        onRelease()
+                    }
+                )
+            }
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragStart = { offset -> onSelectChar(charAtY(offset.y)) },
+                    onVerticalDrag = { change, _ ->
+                        change.consume()
+                        onSelectChar(charAtY(change.position.y))
+                    },
+                    onDragEnd = { onRelease() },
+                    onDragCancel = { onRelease() }
+                )
+            }
+            .padding(vertical = 1.dp),
+        verticalArrangement = Arrangement.SpaceEvenly,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        FAST_SCROLL_BUCKETS.forEach { ch ->
+            val isHighlighted = activeChar == ch
+            Text(
+                text = ch.toString(),
+                color = if (isHighlighted) palette.yellow else palette.comment,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = if (isHighlighted) FontWeight.Bold else FontWeight.Normal,
+                fontSize = 7.5.sp,
+                lineHeight = 8.sp,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun RawPathEditorBar(
+    paneState: PaneState,
+    viewModel: ExplorerViewModel
+) {
+    val palette = LocalPlainTextPalette.current
+    var rawPathText by remember(paneState.currentPath) { mutableStateOf(paneState.currentPath) }
+    val suggestions = remember(rawPathText) {
+        viewModel.fileRepo.listSubdirectorySuggestions(rawPathText)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(palette.backgroundDark)
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "PATH:",
+                color = palette.cyan,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 10.5.sp
+            )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .background(palette.background)
+                    .border(1.dp, palette.cyan)
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            ) {
+                BasicTextField(
+                    value = rawPathText,
+                    onValueChange = { rawPathText = it },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = palette.foreground,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    ),
+                    cursorBrush = SolidColor(palette.cyan),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            PlainTextActionLink(
+                label = "GO",
+                accentColor = palette.green,
+                onClick = {
+                    viewModel.navigateToRawPath(paneState.paneId, rawPathText, createIfMissing = false)
+                }
+            )
+            PlainTextActionLink(
+                label = "+MKDIR",
+                accentColor = palette.yellow,
+                onClick = {
+                    viewModel.navigateToRawPath(paneState.paneId, rawPathText, createIfMissing = true)
+                }
+            )
+            PlainTextActionLink(
+                label = "X",
+                accentColor = palette.red,
+                onClick = {
+                    viewModel.setPathEditorVisible(paneState.paneId, false)
+                }
+            )
+        }
+
+        if (suggestions.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(top = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "TAB:",
+                    color = palette.comment,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.5.sp
+                )
+                suggestions.forEach { sugPath ->
+                    val folderName = sugPath.substringAfterLast('/')
+                    PlainTextActionLink(
+                        label = "$folderName/",
+                        accentColor = palette.cyan,
+                        onClick = {
+                            rawPathText = "$sugPath/"
+                        }
+                    )
+                }
+            }
+        }
+    }
+    AsciiDivider()
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CompactPaneHeaderRow(
     paneState: PaneState,
     isFocused: Boolean,
     internalRoot: String,
+    isInTrash: Boolean,
     onNavigateToPath: (String) -> Unit,
     onNavigateUp: () -> Unit,
+    onTogglePathEditor: () -> Unit,
+    onEmptyTrash: () -> Unit,
     onExitArchive: () -> Unit
 ) {
     val palette = LocalPlainTextPalette.current
@@ -939,7 +1269,17 @@ private fun CompactPaneHeaderRow(
                 .padding(end = 4.dp)
         )
 
-        // Scrollable 1-line breadcrumb path
+        Text(
+            text = "[>_]",
+            color = if (paneState.isPathEditorVisible) palette.green else palette.cyan,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 10.5.sp,
+            modifier = Modifier
+                .clickable(onClick = onTogglePathEditor)
+                .padding(end = 4.dp)
+        )
+
         Row(
             modifier = Modifier
                 .weight(1f)
@@ -978,7 +1318,10 @@ private fun CompactPaneHeaderRow(
                     fontSize = 11.sp,
                     textDecoration = TextDecoration.Underline,
                     modifier = Modifier
-                        .clickable { onNavigateToPath(internalRoot) }
+                        .combinedClickable(
+                            onClick = { onNavigateToPath(internalRoot) },
+                            onLongClick = onTogglePathEditor
+                        )
                         .padding(horizontal = 2.dp)
                 )
 
@@ -1001,11 +1344,26 @@ private fun CompactPaneHeaderRow(
                         fontWeight = if (isLast) FontWeight.Bold else FontWeight.Normal,
                         fontSize = 11.sp,
                         modifier = Modifier
-                            .clickable { onNavigateToPath(target) }
+                            .combinedClickable(
+                                onClick = { onNavigateToPath(target) },
+                                onLongClick = onTogglePathEditor
+                            )
                             .padding(horizontal = 1.5.dp)
                     )
                 }
             }
+        }
+
+        if (isInTrash && paneState.filteredEntries.isNotEmpty()) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "[EMPTY]",
+                color = palette.red,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 10.sp,
+                modifier = Modifier.clickable(onClick = onEmptyTrash)
+            )
         }
 
         Spacer(modifier = Modifier.width(4.dp))
@@ -1060,20 +1418,13 @@ private fun CompactParentRow(
     }
 }
 
-/**
- * Compact File / Folder Row:
- * - Pinned items show a gold `★` marker and appear at the very top of the main list
- * - Single tap: opens folder, enters archive, or opens file in default Android app
- * - Double tap: opens File Details & Checksums modal
- * - Long press (Hold): opens File Operations Menu (Copy, Cut, Paste, Pin, Compress, Rename, Delete...)
- * - Optional horizontal swipe: Right = Select, Left = Pin/Unpin
- */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CompactFileEntryRow(
     entry: FileEntry,
     isSelected: Boolean,
     showCheckbox: Boolean,
+    diffStatus: DiffStatus,
     settings: AppSettings,
     onSingleTap: () -> Unit,
     onDoubleTap: () -> Unit,
@@ -1144,7 +1495,6 @@ private fun CompactFileEntryRow(
             .padding(horizontal = 6.dp, vertical = vPad),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Multi-select checkbox (only shown when multi-select is active)
         if (showCheckbox) {
             Text(
                 text = if (isSelected) "[x]" else "[ ]",
@@ -1158,7 +1508,6 @@ private fun CompactFileEntryRow(
             )
         }
 
-        // Theme-matched Format Icon or ASCII badge
         if (settings.showFileIcons) {
             FileTypeIcon(
                 category = entry.category,
@@ -1177,7 +1526,6 @@ private fun CompactFileEntryRow(
             )
         }
 
-        // File / Folder Name (+ optional subtitle if enabled in Settings)
         Column(modifier = Modifier.weight(1f)) {
             val pinPrefix = if (entry.isPinned) "★ " else ""
             val dirSuffix = if (entry.isDirectory) "/" else ""
@@ -1207,9 +1555,27 @@ private fun CompactFileEntryRow(
             }
         }
 
-        Spacer(modifier = Modifier.width(6.dp))
+        if (diffStatus != DiffStatus.NONE && diffStatus != DiffStatus.IDENTICAL) {
+            val badgeColor = when (diffStatus) {
+                DiffStatus.ONLY_IN_P1 -> palette.green
+                DiffStatus.ONLY_IN_P2 -> palette.cyan
+                DiffStatus.NEWER_HERE -> palette.orange
+                DiffStatus.OLDER_HERE -> palette.comment
+                DiffStatus.SIZE_DIFF -> palette.yellow
+                else -> palette.comment
+            }
+            Text(
+                text = diffStatus.badge,
+                color = badgeColor,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = (9.5f * fontScale).sp,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
+        }
 
-        // Compact right-aligned size or folder item count
+        Spacer(modifier = Modifier.width(4.dp))
+
         Text(
             text = sizeLabel,
             color = if (entry.isDirectory) palette.comment else palette.yellow,

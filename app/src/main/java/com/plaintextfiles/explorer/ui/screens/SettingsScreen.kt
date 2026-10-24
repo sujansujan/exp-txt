@@ -39,6 +39,7 @@ import com.plaintextfiles.explorer.ui.theme.LocalPlainTextPalette
 fun SettingsScreen(
     settings: AppSettings,
     pinnedCount: Int,
+    trashCount: Int,
     viewModel: ExplorerViewModel
 ) {
     val palette = LocalPlainTextPalette.current
@@ -50,7 +51,6 @@ fun SettingsScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // Compact Top Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -72,7 +72,7 @@ fun SettingsScreen(
                 fontSize = 13.sp
             )
             Text(
-                text = "v1.4",
+                text = "v1.7",
                 color = palette.comment,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp
@@ -155,9 +155,9 @@ fun SettingsScreen(
                 )
             }
 
-            // 2. Dual-Pane & Layout
+            // 2. Dual-Pane & Power Tools
             AsciiFramedSection(
-                title = "DUAL-PANE & NAVIGATION",
+                title = "DUAL-PANE & COMPARE TOOLS",
                 titleColor = palette.cyan
             ) {
                 SettingLabel("Default Pane Layout")
@@ -177,6 +177,15 @@ fun SettingsScreen(
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
+                SettingToggleRow(
+                    title = "Highlight P1 vs P2 Diff Badges ([+P1], [+P2], [~NEW])",
+                    checked = settings.showDiffHighlights,
+                    onToggle = {
+                        viewModel.updateSettings { s -> s.copy(showDiffHighlights = !s.showDiffHighlights) }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
                 SettingToggleRow(
                     title = "Remember Last Open Folder per Pane",
                     checked = settings.rememberLastPaths,
@@ -205,11 +214,51 @@ fun SettingsScreen(
                 }
             }
 
-            // 3. Pinned Items & Sorting
+            // 3. Trash Bin, Pinned Items & Sorting
             AsciiFramedSection(
-                title = "PINNED ITEMS & SORTING",
+                title = "TRASH BIN, PINNED ITEMS & SORTING",
                 titleColor = palette.yellow
             ) {
+                SettingToggleRow(
+                    title = "Use Trash Bin (.exp-txt-trash) with Instant Undo",
+                    checked = settings.useTrashBin,
+                    onToggle = {
+                        viewModel.updateSettings { s -> s.copy(useTrashBin = !s.useTrashBin) }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Trash Bin Items: $trashCount",
+                        color = palette.comment,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.5.sp
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        PlainTextActionLink(
+                            label = "OPEN TRASH",
+                            accentColor = palette.cyan,
+                            onClick = { viewModel.openTrashInActivePane() }
+                        )
+                        if (trashCount > 0) {
+                            PlainTextActionLink(
+                                label = "EMPTY TRASH",
+                                accentColor = palette.red,
+                                onClick = { viewModel.emptyTrashBin() }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                AsciiDivider()
+                Spacer(modifier = Modifier.height(6.dp))
+
                 SettingToggleRow(
                     title = "Keep Global Pinned Items at Top of Every Folder",
                     checked = settings.globalPinnedAtTop,
@@ -258,13 +307,24 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. Gestures Guide & Toggle
+            // 4. Navigation & Gestures
             AsciiFramedSection(
-                title = "ANDROID GESTURES",
+                title = "GESTURES & FAST NAVIGATION",
                 titleColor = palette.green
             ) {
                 SettingToggleRow(
-                    title = "Swipe Row (Right = Select, Left = Pin to Top)",
+                    title = "Show Fast-Scroll ASCII Index Rail (# A-Z)",
+                    checked = settings.showFastScrollRail,
+                    onToggle = {
+                        viewModel.updateSettings { s ->
+                            s.copy(showFastScrollRail = !s.showFastScrollRail)
+                        }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                SettingToggleRow(
+                    title = "Swipe Row Gesture (Right = Select, Left = Pin)",
                     checked = settings.enableRowSwipeGesture,
                     onToggle = {
                         viewModel.updateSettings { s ->
@@ -272,14 +332,22 @@ fun SettingsScreen(
                         }
                     }
                 )
+
                 Spacer(modifier = Modifier.height(6.dp))
                 AsciiDivider()
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "• Single Tap  : Open folder / archive, or open file in default Android app\n" +
-                        "• Double Tap  : Show File Details, Permissions & SHA/MD5 Hashes\n" +
-                        "• Hold (Long) : Copy, Cut, Paste, Pin, Compress, Extract, Rename, Delete\n" +
-                        "• Drag Bar    : Drag split divider to resize Pane 1 & Pane 2 (double-tap = 50/50)",
+                    text = "• Single Tap  : Open folder / archive, or open file in default Android app
+" +
+                        "• Double Tap  : Show File Details, Permissions & SHA/MD5 Hashes
+" +
+                        "• Hold (Long) : Copy, Cut, Paste, Pin, Compress, Extract, Rename, Trash/Delete
+" +
+                        "• Path [>_]   : Tap [>_] or hold path bar to type/paste raw path with auto-complete
+" +
+                        "• Index Rail  : Drag # A-Z rail on right edge to jump across large directories
+" +
+                        "• Share Target: Share files from any Android app to exp-txt to save or .zip",
                     color = palette.comment,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,

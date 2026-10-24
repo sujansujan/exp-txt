@@ -3,23 +3,31 @@ package com.plaintextfiles.explorer.data
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
 import com.plaintextfiles.explorer.archive.ArchiveEngine
 import com.plaintextfiles.explorer.model.ArchiveFormat
+import com.plaintextfiles.explorer.model.DiffStatus
 import com.plaintextfiles.explorer.model.FileDetailedInfo
 import com.plaintextfiles.explorer.model.FileEntry
+import com.plaintextfiles.explorer.model.PaneComparisonSummary
 import com.plaintextfiles.explorer.model.PlainFileCategory
+import com.plaintextfiles.explorer.model.SharedIncomingItem
 import com.plaintextfiles.explorer.model.SortConfig
 import com.plaintextfiles.explorer.model.SortField
 import com.plaintextfiles.explorer.model.SortOrder
+import com.plaintextfiles.explorer.model.TrashRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -40,10 +48,6 @@ class FileSystemRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Internal device storage root (/storage/emulated/0).
-     * Strictly uses internal storage as requested.
-     */
     fun internalStorageRoot(): String {
         val primary = Environment.getExternalStorageDirectory()
         return if (primary.exists()) {
@@ -51,6 +55,48 @@ class FileSystemRepository(private val context: Context) {
         } else {
             context.filesDir.absolutePath
         }
+    }
+
+    fun trashDirectoryPath(): String {
+        val dir = File(internalStorageRoot(), TRASH_FOLDER_NAME)
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir.absolutePath
+    }
+
+    fun isTrashPath(path: String): Boolean {
+        return path.endsWith("/$TRASH_FOLDER_NAME") || path.contains("/$TRASH_FOLDER_NAME/")
+    }
+
+    fun getTrashItemCount(): Int {
+        val dir = File(internalStorageRoot(), TRASH_FOLDER_NAME)
+        if (!dir.exists() || !dir.isDirectory) return 0
+        return dir.listFiles()?.count { !it.name.startsWith(".") } ?: 0
+    }
+
+    fun listSubdirectorySuggestions(rawInput: String): List<String> {
+        return runCatching {
+            val trimmed = rawInput.trim()
+            if (trimmed.isEmpty()) return emptyList()
+            val asFile = File(trimmed)
+            val parentDir: File
+            val prefix: String
+            if (trimmed.endsWith("/") && asFile.isDirectory) {
+                parentDir = asFile
+                prefix = ""
+            } else {
+                parentDir = asFile.parentFile ?: return emptyList()
+                prefix = asFile.name
+            }
+            if (!parentDir.exists() || !parentDir.isDirectory) return emptyList()
+            parentDir.listFiles()
+                ?.filter { it.isDirectory && !it.name.startsWith(".") && it.name.startsWith(prefix, ignoreCase = true) }
+                ?.sortedBy { it.name.lowercase(Locale.ROOT) }
+                ?.take(8)
+                ?.map { it.absolutePath }
+                ?: emptyList()
+        }.getOrDefault(emptyList())
     }
 
     fun queryStatFs(dir: File): Pair<Long, Long> {
@@ -93,8 +139,7 @@ class FileSystemRepository(private val context: Context) {
 
             val localPathsSet = localEntries.map { it.path }.toSet()
 
-            // If globalPinnedAtTop is enabled, include pinned items from other internal directories at the very top
-            val externalPinnedEntries = if (globalPinnedAtTop) {
+            val externalPinnedEntries = if (globalPinnedAtTop && !isTrashPath(dirPath)) {
                 pinnedPaths.mapNotNull { pinnedPath ->
                     if (pinnedPath in localPathsSet || pinnedPath == dir.absolutePath) {
                         null
@@ -162,21 +207,14 @@ class FileSystemRepository(private val context: Context) {
         )
     }
 
-    /**
-     * Pinned items are ALWAYS sorted to the top of the main list, followed by folders (if foldersFirst),
-     * then sorted by the user's selected SortField and SortOrder.
-     */
     fun sortEntries(entries: List<FileEntry>, config: SortConfig): List<FileEntry> {
         val comparator = Comparator<FileEntry> { a, b ->
-            // 1. Pinned items ALWAYS come first at the top of the main list
             if (a.isPinned != b.isPinned) {
                 return@Comparator if (a.isPinned) -1 else 1
             }
-            // Local pinned items in this directory before global pinned shortcuts (or both at top)
             if (a.isPinned && b.isPinned && a.isPinnedShortcutFromOtherDir != b.isPinnedShortcutFromOtherDir) {
                 return@Comparator if (!a.isPinnedShortcutFromOtherDir) -1 else 1
             }
-            // 2. Folders first (when enabled)
             if (config.foldersFirst && a.isDirectory != b.isDirectory) {
                 return@Comparator if (a.isDirectory) -1 else 1
             }
@@ -201,13 +239,86 @@ class FileSystemRepository(private val context: Context) {
         return entries.sortedWith(comparator)
     }
 
+    /**
+     * Compares Pane 1 and Pane 2 entries by filename, returning both a summary for the
+     * Compare & Sync Modal and a map of DiffStatus badges keyed by entry.uniqueKey.
+     */
+    fun comparePaneEntries(
+        entriesA: List<FileEntry>,
+        entriesB: List<FileEntry>,
+        pathA: String,
+        pathB: String
+    ): Pair<PaneComparisonSummary, Map<String, DiffStatus>> {
+        val localA = entriesA.filter { !it.isPinnedShortcutFromOtherDir }
+        val localB = entriesB.filter { !it.isPinnedShortcutFromOtherDir }
+
+        val mapA = localA.associateBy { it.name }
+        val mapB = localB.associateBy { it.name }
+
+        val onlyInA = mutableListOf<FileEntry>()
+        val onlyInB = mutableListOf<FileEntry>()
+        val newerInA = mutableListOf<FileEntry>()
+        val newerInB = mutableListOf<FileEntry>()
+        var identicalCount = 0
+        val badgeMap = mutableMapOf<String, DiffStatus>()
+
+        for (itemA in localA) {
+            val matchB = mapB[itemA.name]
+            if (matchB == null) {
+                onlyInA.add(itemA)
+                badgeMap[itemA.uniqueKey] = DiffStatus.ONLY_IN_P1
+            } else {
+                val timeDiff = itemA.lastModified - matchB.lastModified
+                if (itemA.isDirectory && matchB.isDirectory) {
+                    identicalCount++
+                    badgeMap[itemA.uniqueKey] = DiffStatus.IDENTICAL
+                    badgeMap[matchB.uniqueKey] = DiffStatus.IDENTICAL
+                } else if (timeDiff > 2000L) {
+                    newerInA.add(itemA)
+                    badgeMap[itemA.uniqueKey] = DiffStatus.NEWER_HERE
+                    badgeMap[matchB.uniqueKey] = DiffStatus.OLDER_HERE
+                } else if (timeDiff < -2000L) {
+                    newerInB.add(matchB)
+                    badgeMap[itemA.uniqueKey] = DiffStatus.OLDER_HERE
+                    badgeMap[matchB.uniqueKey] = DiffStatus.NEWER_HERE
+                } else if (itemA.size != matchB.size) {
+                    newerInA.add(itemA)
+                    badgeMap[itemA.uniqueKey] = DiffStatus.SIZE_DIFF
+                    badgeMap[matchB.uniqueKey] = DiffStatus.SIZE_DIFF
+                } else {
+                    identicalCount++
+                    badgeMap[itemA.uniqueKey] = DiffStatus.IDENTICAL
+                    badgeMap[matchB.uniqueKey] = DiffStatus.IDENTICAL
+                }
+            }
+        }
+
+        for (itemB in localB) {
+            if (itemB.name !in mapA) {
+                onlyInB.add(itemB)
+                badgeMap[itemB.uniqueKey] = DiffStatus.ONLY_IN_P2
+            }
+        }
+
+        val summary = PaneComparisonSummary(
+            paneAPath = pathA,
+            paneBPath = pathB,
+            onlyInA = onlyInA,
+            onlyInB = onlyInB,
+            newerInA = newerInA,
+            newerInB = newerInB,
+            identicalCount = identicalCount
+        )
+        return Pair(summary, badgeMap)
+    }
+
     suspend fun inspectFileDetails(
         entry: FileEntry,
         archiveEngine: ArchiveEngine,
         password: String? = null
     ): FileDetailedInfo = withContext(Dispatchers.IO) {
         if (entry.isVirtualArchiveEntry && entry.archiveHostPath != null && entry.archiveInternalPath != null) {
-            val crcHex = entry.crc32?.let { String.format(Locale.US, "%08X", it) }
+            val crc32Hex = entry.crc32?.let { String.format(Locale.US, "%08X", it) }
             return@withContext FileDetailedInfo(
                 entry = entry,
                 mimeType = resolveMimeType(entry.name, entry.isDirectory),
@@ -353,9 +464,6 @@ class FileSystemRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Batch rename selected items using a base prefix, optional numbering (01, 02...), and preserving extensions.
-     */
     suspend fun batchRenameEntries(
         entries: List<FileEntry>,
         prefix: String,
@@ -377,6 +485,94 @@ class FileSystemRepository(private val context: Context) {
                 }
             }
             renamedCount
+        }
+    }
+
+    /**
+     * Moves entries to the internal `.exp-txt-trash` folder and returns a list of TrashRecords
+     * so the user can undo the deletion in one tap.
+     */
+    suspend fun moveEntriesToTrash(
+        entries: List<FileEntry>,
+        onProgress: ((Int, Int, String) -> Unit)? = null
+    ): Result<List<TrashRecord>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val trashDir = File(trashDirectoryPath())
+            if (!trashDir.exists()) trashDir.mkdirs()
+
+            val records = mutableListOf<TrashRecord>()
+            val total = entries.size
+            val now = System.currentTimeMillis()
+
+            entries.forEachIndexed { idx, item ->
+                onProgress?.invoke(idx + 1, total, "Moving ${item.name} to Trash")
+                val src = File(item.path)
+                if (src.exists()) {
+                    var dest = File(trashDir, src.name)
+                    if (dest.exists()) {
+                        val base = src.nameWithoutExtension
+                        val ext = src.extension.let { if (it.isEmpty()) "" else ".$it" }
+                        dest = File(trashDir, "${base}_${now % 100000}$ext")
+                    }
+                    val moved = if (src.renameTo(dest)) {
+                        true
+                    } else {
+                        val copied = src.copyRecursively(dest, overwrite = true)
+                        if (copied) src.deleteRecursively() else false
+                    }
+                    if (moved) {
+                        records.add(
+                            TrashRecord(
+                                trashedFilePath = dest.absolutePath,
+                                originalFilePath = src.absolutePath,
+                                originalName = src.name,
+                                deletedAtMillis = now
+                            )
+                        )
+                    }
+                }
+            }
+            records
+        }
+    }
+
+    suspend fun restoreTrashRecords(
+        records: List<TrashRecord>,
+        onProgress: ((Int, Int, String) -> Unit)? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            var restored = 0
+            val total = records.size
+            records.forEachIndexed { idx, rec ->
+                onProgress?.invoke(idx + 1, total, "Restoring ${rec.originalName}")
+                val trashed = File(rec.trashedFilePath)
+                val orig = File(rec.originalFilePath)
+                if (trashed.exists()) {
+                    orig.parentFile?.mkdirs()
+                    val ok = if (trashed.renameTo(orig)) {
+                        true
+                    } else {
+                        val copied = trashed.copyRecursively(orig, overwrite = true)
+                        if (copied) trashed.deleteRecursively() else false
+                    }
+                    if (ok) restored++
+                }
+            }
+            restored
+        }
+    }
+
+    suspend fun emptyTrashBin(): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            val trashDir = File(trashDirectoryPath())
+            val children = trashDir.listFiles() ?: emptyArray()
+            var removed = 0
+            for (child in children) {
+                if (child.deleteRecursively()) {
+                    removed++
+                }
+            }
+            removed
         }
     }
 
@@ -460,7 +656,99 @@ class FileSystemRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Inspects a shared content:// or file:// Uri from an external Android app.
+     */
+    fun inspectIncomingUri(uri: Uri): SharedIncomingItem {
+        var displayName: String? = null
+        var sizeBytes = 0L
+
+        runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0 && !cursor.isNull(nameIdx)) {
+                        displayName = cursor.getString(nameIdx)
+                    }
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                        sizeBytes = cursor.getLong(sizeIdx)
+                    }
+                }
+            }
+        }
+
+        val resolvedName = displayName
+            ?.trim()
+            ?.replace('/', '_')
+            ?.takeIf { it.isNotEmpty() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
+            ?: "shared_${System.currentTimeMillis()}"
+
+        return SharedIncomingItem(
+            uriString = uri.toString(),
+            displayName = resolvedName,
+            sizeBytes = sizeBytes
+        )
+    }
+
+    /**
+     * Copies shared Uris and/or shared plain text from another Android app into destinationDirPath.
+     */
+    suspend fun saveSharedItemsToDirectory(
+        items: List<SharedIncomingItem>,
+        sharedText: String?,
+        destinationDirPath: String,
+        onProgress: ((Int, Int, String) -> Unit)? = null
+    ): Result<List<File>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val destDir = File(destinationDirPath)
+            if (!destDir.exists()) destDir.mkdirs()
+            require(destDir.isDirectory) { "Invalid destination folder: $destinationDirPath" }
+
+            val savedFiles = mutableListOf<File>()
+            val total = items.size + (if (!sharedText.isNullOrBlank() && items.isEmpty()) 1 else 0)
+
+            items.forEachIndexed { idx, item ->
+                onProgress?.invoke(idx + 1, total.coerceAtLeast(1), "Saving ${item.displayName}")
+                val uri = Uri.parse(item.uriString)
+                val outFile = uniqueDestinationFile(destDir, item.displayName)
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    BufferedOutputStream(FileOutputStream(outFile)).use { output ->
+                        input.copyTo(output, 64 * 1024)
+                    }
+                } ?: throw IllegalStateException("Cannot read shared stream: ${item.displayName}")
+                savedFiles.add(outFile)
+            }
+
+            if (!sharedText.isNullOrBlank() && items.isEmpty()) {
+                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                val noteFile = uniqueDestinationFile(destDir, "shared_text_$stamp.txt")
+                noteFile.writeText(sharedText, Charsets.UTF_8)
+                savedFiles.add(noteFile)
+            }
+
+            savedFiles
+        }
+    }
+
+    private fun uniqueDestinationFile(destDir: File, desiredName: String): File {
+        var candidate = File(destDir, desiredName)
+        if (!candidate.exists()) return candidate
+        val dotIdx = desiredName.lastIndexOf('.')
+        val base = if (dotIdx > 0) desiredName.substring(0, dotIdx) else desiredName
+        val ext = if (dotIdx > 0) desiredName.substring(dotIdx) else ""
+        var counter = 1
+        while (candidate.exists()) {
+            candidate = File(destDir, "${base}_$counter$ext")
+            counter++
+        }
+        return candidate
+    }
+
     companion object {
+        const val TRASH_FOLDER_NAME = ".exp-txt-trash"
+
         private val TEXT_EXTENSIONS = setOf(
             "txt", "md", "markdown", "rst", "log", "json", "xml", "yml", "yaml", "toml",
             "ini", "cfg", "conf", "properties", "env", "csv", "tsv", "sql",

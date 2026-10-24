@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
             requestAllFilesPermission()
         }
 
+        handleIncomingShareIntent(intent)
+
         setContent {
             val state by viewModel.uiState.collectAsState()
             PlainTextTheme(themeMode = state.settings.themeMode) {
@@ -70,9 +72,62 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingShareIntent(intent)
+    }
+
     override fun onResume() {
         super.onResume()
         viewModel.refreshPermissionState()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleIncomingShareIntent(incoming: Intent?) {
+        val action = incoming?.action ?: return
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) {
+            return
+        }
+
+        val collectedUris = linkedSetOf<Uri>()
+
+        if (action == Intent.ACTION_SEND) {
+            val singleUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                incoming.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                incoming.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+            }
+            if (singleUri != null) {
+                collectedUris.add(singleUri)
+            }
+        } else if (action == Intent.ACTION_SEND_MULTIPLE) {
+            val multiUris: ArrayList<Uri>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                incoming.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                incoming.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+            }
+            if (multiUris != null) {
+                collectedUris.addAll(multiUris)
+            }
+        }
+
+        val clip = incoming.clipData
+        if (clip != null) {
+            for (i in 0 until clip.itemCount) {
+                val u = clip.getItemAt(i)?.uri
+                if (u != null) {
+                    collectedUris.add(u)
+                }
+            }
+        }
+
+        val sharedText = incoming.getStringExtra(Intent.EXTRA_TEXT)
+        incoming.action = Intent.ACTION_MAIN
+
+        if (collectedUris.isNotEmpty() || !sharedText.isNullOrBlank()) {
+            viewModel.onReceiveExternalShare(collectedUris.toList(), sharedText)
+        }
     }
 
     private fun requestAllFilesPermission() {
@@ -97,9 +152,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Always opens any selected file in its default Android system app via FileProvider.
-     */
     private fun openFileWithSystem(file: File) {
         runCatching {
             val uri = FileProvider.getUriForFile(
@@ -118,7 +170,6 @@ class MainActivity : ComponentActivity() {
             }
             startActivity(intent)
         }.onFailure {
-            // Fallback with chooser and wildcard MIME if no direct default handler matched
             runCatching {
                 val uri = FileProvider.getUriForFile(
                     this,

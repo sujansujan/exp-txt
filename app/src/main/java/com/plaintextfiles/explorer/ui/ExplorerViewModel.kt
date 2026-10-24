@@ -2,6 +2,7 @@ package com.plaintextfiles.explorer.ui
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.plaintextfiles.explorer.archive.ArchiveEngine
@@ -10,18 +11,22 @@ import com.plaintextfiles.explorer.model.AppSettings
 import com.plaintextfiles.explorer.model.ArchiveFormat
 import com.plaintextfiles.explorer.model.ClipboardBuffer
 import com.plaintextfiles.explorer.model.ClipboardMode
+import com.plaintextfiles.explorer.model.DiffStatus
 import com.plaintextfiles.explorer.model.DualPaneMode
 import com.plaintextfiles.explorer.model.FileDetailedInfo
 import com.plaintextfiles.explorer.model.FileEntry
 import com.plaintextfiles.explorer.model.FontScalePreset
+import com.plaintextfiles.explorer.model.PaneComparisonSummary
 import com.plaintextfiles.explorer.model.PaneId
 import com.plaintextfiles.explorer.model.PaneState
 import com.plaintextfiles.explorer.model.RowDensity
+import com.plaintextfiles.explorer.model.SharedIncomingItem
 import com.plaintextfiles.explorer.model.SortConfig
 import com.plaintextfiles.explorer.model.SortField
 import com.plaintextfiles.explorer.model.SortOrder
 import com.plaintextfiles.explorer.model.ThemeMode
 import com.plaintextfiles.explorer.model.TransferProgress
+import com.plaintextfiles.explorer.model.TrashUndoBatch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +37,11 @@ import java.io.File
 sealed interface PlainDialogState {
     data class ItemActionMenu(val paneId: PaneId, val entries: List<FileEntry>) : PlainDialogState
     data class SortModal(val paneId: PaneId) : PlainDialogState
+    data object ComparePanesModal : PlainDialogState
+    data class IncomingShareModal(
+        val items: List<SharedIncomingItem>,
+        val sharedText: String?
+    ) : PlainDialogState
     data class CreateFolder(val paneId: PaneId) : PlainDialogState
     data class CreateFile(val paneId: PaneId) : PlainDialogState
     data class RenameEntry(val paneId: PaneId, val entry: FileEntry) : PlainDialogState
@@ -65,6 +75,10 @@ data class ExplorerUiState(
     val paneA: PaneState = PaneState(paneId = PaneId.PANE_A, currentPath = "/storage/emulated/0"),
     val paneB: PaneState = PaneState(paneId = PaneId.PANE_B, currentPath = "/storage/emulated/0/Download"),
     val pinnedPaths: Set<String> = emptySet(),
+    val diffBadges: Map<String, DiffStatus> = emptyMap(),
+    val compareSummary: PaneComparisonSummary? = null,
+    val trashUndoBatch: TrashUndoBatch? = null,
+    val trashItemCount: Int = 0,
     val hasStoragePermission: Boolean = false,
     val detailsPaneId: PaneId? = null,
     val detailsEntry: FileEntry? = null,
@@ -80,7 +94,7 @@ data class ExplorerUiState(
 
 class ExplorerViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val prefs = application.getSharedPreferences("exp_txt_prefs_v4", Context.MODE_PRIVATE)
+    private val prefs = application.getSharedPreferences("exp_txt_prefs_v7", Context.MODE_PRIVATE)
     val fileRepo = FileSystemRepository(application.applicationContext)
     val archiveEngine = ArchiveEngine(fileRepo)
 
@@ -117,6 +131,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 settings = loadedSettings,
                 pinnedPaths = loadedPins,
                 hasStoragePermission = fileRepo.hasAllFilesAccess(),
+                trashItemCount = fileRepo.getTrashItemCount(),
                 paneA = it.paneA.copy(currentPath = startA, sortConfig = initialSort),
                 paneB = it.paneB.copy(currentPath = startB, sortConfig = initialSort)
             )
@@ -148,6 +163,9 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             globalPinnedAtTop = prefs.getBoolean("global_pinned_at_top", true),
             rememberLastPaths = prefs.getBoolean("remember_last_paths", true),
             enableRowSwipeGesture = prefs.getBoolean("enable_row_swipe", true),
+            showFastScrollRail = prefs.getBoolean("show_fast_scroll_rail", true),
+            useTrashBin = prefs.getBoolean("use_trash_bin", true),
+            showDiffHighlights = prefs.getBoolean("show_diff_highlights", false),
             splitRatio = prefs.getFloat("split_ratio", 0.50f).coerceIn(0.22f, 0.78f)
         )
     }
@@ -166,6 +184,9 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             .putBoolean("global_pinned_at_top", next.globalPinnedAtTop)
             .putBoolean("remember_last_paths", next.rememberLastPaths)
             .putBoolean("enable_row_swipe", next.enableRowSwipeGesture)
+            .putBoolean("show_fast_scroll_rail", next.showFastScrollRail)
+            .putBoolean("use_trash_bin", next.useTrashBin)
+            .putBoolean("show_diff_highlights", next.showDiffHighlights)
             .putFloat("split_ratio", next.splitRatio.coerceIn(0.22f, 0.78f))
             .apply()
 
@@ -197,7 +218,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun openSettingsScreen() {
-        _uiState.update { it.copy(isSettingsOpen = true) }
+        _uiState.update { it.copy(isSettingsOpen = true, trashItemCount = fileRepo.getTrashItemCount()) }
     }
 
     fun closeSettingsScreen() {
@@ -214,7 +235,12 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun refreshAllPanes() {
-        _uiState.update { it.copy(hasStoragePermission = fileRepo.hasAllFilesAccess()) }
+        _uiState.update {
+            it.copy(
+                hasStoragePermission = fileRepo.hasAllFilesAccess(),
+                trashItemCount = fileRepo.getTrashItemCount()
+            )
+        }
         reloadPane(PaneId.PANE_A)
         reloadPane(PaneId.PANE_B)
     }
@@ -225,7 +251,235 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    // =========================================================================
+    // Feature 1: Dual-Pane Compare & Sync (DIFF P1 <-> P2)
+    // =========================================================================
+    private fun refreshPaneComparison() {
+        val s = _uiState.value
+        val (summary, badgeMap) = fileRepo.comparePaneEntries(
+            entriesA = s.paneA.entries,
+            entriesB = s.paneB.entries,
+            pathA = s.paneA.compactTitle,
+            pathB = s.paneB.compactTitle
+        )
+        _uiState.update {
+            it.copy(
+                compareSummary = summary,
+                diffBadges = badgeMap,
+                trashItemCount = fileRepo.getTrashItemCount()
+            )
+        }
+    }
+
+    fun openComparePanesModal() {
+        refreshPaneComparison()
+        _uiState.update { it.copy(activeDialog = PlainDialogState.ComparePanesModal) }
+    }
+
+    fun toggleDiffHighlights() {
+        updateSettings { it.copy(showDiffHighlights = !it.showDiffHighlights) }
+    }
+
+    fun selectUniqueInPane(paneId: PaneId) {
+        refreshPaneComparison()
+        val summary = _uiState.value.compareSummary ?: return
+        val uniqueItems = if (paneId == PaneId.PANE_A) summary.onlyInA else summary.onlyInB
+        val keys = uniqueItems.map { it.uniqueKey }.toSet()
+        updatePaneState(paneId) { it.copy(selectedKeys = keys) }
+        setActivePane(paneId)
+        _uiState.update { it.copy(activeDialog = null) }
+    }
+
+    fun syncMissingAndNewer(sourcePaneId: PaneId) {
+        refreshPaneComparison()
+        val summary = _uiState.value.compareSummary ?: return
+        val toSync = if (sourcePaneId == PaneId.PANE_A) summary.syncAToBEntries else summary.syncBToAEntries
+        if (toSync.isEmpty()) {
+            _uiState.update { it.copy(activeDialog = null, toastMessage = "Panes are already in sync") }
+            return
+        }
+        copyOrMoveToOppositePane(sourcePaneId, toSync, move = false)
+    }
+
+    // =========================================================================
+    // Feature 4: Raw Path Editor & Trash / Undo Buffer
+    // =========================================================================
+    fun setPathEditorVisible(paneId: PaneId, visible: Boolean) {
+        updatePaneState(paneId) { it.copy(isPathEditorVisible = visible) }
+    }
+
+    fun navigateToRawPath(paneId: PaneId, rawPath: String, createIfMissing: Boolean = false) {
+        val cleaned = rawPath.trim()
+        if (cleaned.isEmpty()) return
+        val target = if (cleaned.startsWith("~")) {
+            fileRepo.internalStorageRoot() + cleaned.removePrefix("~")
+        } else {
+            cleaned
+        }
+        val dir = File(target)
+        if (!dir.exists() && createIfMissing) {
+            dir.mkdirs()
+        }
+        if (dir.exists() && dir.isDirectory) {
+            updatePaneState(paneId) { it.copy(isPathEditorVisible = false) }
+            loadPaneDirectory(paneId, dir.absolutePath, recordHistory = true)
+        } else if (dir.exists() && dir.isFile && ArchiveFormat.isArchiveFileName(dir.name)) {
+            updatePaneState(paneId) { it.copy(isPathEditorVisible = false) }
+            loadVirtualArchive(paneId, dir.absolutePath)
+        } else {
+            updatePaneState(paneId) {
+                it.copy(errorMessage = "Path not found: $target")
+            }
+        }
+    }
+
+    fun openTrashInActivePane() {
+        val activeId = _uiState.value.activePaneId
+        val trashPath = fileRepo.trashDirectoryPath()
+        closeSettingsScreen()
+        loadPaneDirectory(activeId, trashPath, recordHistory = true)
+    }
+
+    fun undoLastTrash() {
+        val batch = _uiState.value.trashUndoBatch ?: return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    trashUndoBatch = null,
+                    transferProgress = TransferProgress("Restoring from Trash...", 0, batch.records.size)
+                )
+            }
+            fileRepo.restoreTrashRecords(batch.records) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = { count ->
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            toastMessage = "Restored $count item(s) from Trash"
+                        )
+                    }
+                    reloadPane(PaneId.PANE_A)
+                    reloadPane(PaneId.PANE_B)
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            toastMessage = "Restore failed: ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun dismissTrashUndoBanner() {
+        _uiState.update { it.copy(trashUndoBatch = null) }
+    }
+
+    fun emptyTrashBin() {
+        viewModelScope.launch {
+            fileRepo.emptyTrashBin().fold(
+                onSuccess = { removed ->
+                    _uiState.update {
+                        it.copy(
+                            trashUndoBatch = null,
+                            trashItemCount = 0,
+                            toastMessage = "Emptied Trash ($removed item(s) removed)"
+                        )
+                    }
+                    reloadPane(PaneId.PANE_A)
+                    reloadPane(PaneId.PANE_B)
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(toastMessage = "Empty Trash Error: ${err.message}") }
+                }
+            )
+        }
+    }
+
+    // =========================================================================
+    // Feature 5: System "Share to exp-txt" Target
+    // =========================================================================
+    fun onReceiveExternalShare(uris: List<Uri>, sharedText: String?) {
+        viewModelScope.launch {
+            val inspected = uris.map { fileRepo.inspectIncomingUri(it) }
+            _uiState.update {
+                it.copy(
+                    isSettingsOpen = false,
+                    activeDialog = PlainDialogState.IncomingShareModal(
+                        items = inspected,
+                        sharedText = sharedText
+                    )
+                )
+            }
+        }
+    }
+
+    fun saveIncomingShare(
+        targetPaneId: PaneId,
+        items: List<SharedIncomingItem>,
+        sharedText: String?,
+        compressToZip: Boolean,
+        zipBaseName: String = "shared_bundle"
+    ) {
+        val destDirPath = _uiState.value.getPane(targetPaneId).currentPath
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    activeDialog = null,
+                    transferProgress = TransferProgress(
+                        "Saving shared item(s) to ${targetPaneId.shortCode}...",
+                        0,
+                        items.size.coerceAtLeast(1)
+                    )
+                )
+            }
+            fileRepo.saveSharedItemsToDirectory(items, sharedText, destDirPath) { cur, tot, msg ->
+                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+            }.fold(
+                onSuccess = { savedFiles ->
+                    if (compressToZip && savedFiles.isNotEmpty()) {
+                        val entriesToPack = savedFiles.map { fileRepo.fileToFileEntry(it) }
+                        val cleanZipName = zipBaseName.trim().ifEmpty { "shared_bundle" }
+                        archiveEngine.createArchive(
+                            sourceEntries = entriesToPack,
+                            destinationDirPath = destDirPath,
+                            archiveBaseName = cleanZipName,
+                            format = ArchiveFormat.ZIP,
+                            password = null
+                        ) { cur, tot, msg ->
+                            _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+                        }.onSuccess {
+                            savedFiles.forEach { f -> f.deleteRecursively() }
+                        }
+                    }
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            activePaneId = targetPaneId,
+                            toastMessage = "Saved ${savedFiles.size} shared item(s) to ${targetPaneId.shortCode}"
+                        )
+                    }
+                    reloadPane(PaneId.PANE_A)
+                    reloadPane(PaneId.PANE_B)
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            transferProgress = null,
+                            toastMessage = "Share Save Error: ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    // =========================================================================
     // Pinned Items Management (Always at Top of Main List)
+    // =========================================================================
     fun togglePinEntry(entry: FileEntry) {
         if (entry.isVirtualArchiveEntry) return
         val currentPins = _uiState.value.pinnedPaths.toMutableSet()
@@ -294,7 +548,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 currentPane.historyBackStack
             }
 
-            if (stateSnapshot.settings.rememberLastPaths) {
+            if (stateSnapshot.settings.rememberLastPaths && !fileRepo.isTrashPath(targetPath)) {
                 val key = if (paneId == PaneId.PANE_A) "last_path_a" else "last_path_b"
                 prefs.edit().putString(key, targetPath).apply()
             }
@@ -333,6 +587,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                             totalFreeBytes = statPair.second
                         )
                     }
+                    refreshPaneComparison()
                 },
                 onFailure = { err ->
                     updatePaneState(paneId) { pane ->
@@ -394,6 +649,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                             historyBackStack = updatedHistory.takeLast(40)
                         )
                     }
+                    refreshPaneComparison()
                 },
                 onFailure = { err ->
                     val msg = err.message.orEmpty()
@@ -466,6 +722,10 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             clearSelection(activeId)
             return true
         }
+        if (pane.isPathEditorVisible) {
+            setPathEditorVisible(activeId, false)
+            return true
+        }
         if (pane.isSearchVisible || pane.searchQuery.isNotEmpty()) {
             setPaneSearchVisible(activeId, false)
             return true
@@ -490,13 +750,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         return false
     }
 
-    /**
-     * Single Tap Handler:
-     * - If multi-select is active in this pane, toggles selection
-     * - If directory, enters directory
-     * - If archive on disk, opens virtual archive browsing
-     * - Otherwise ALWAYS opens the file in its default Android system app!
-     */
     fun onSingleTapEntry(
         paneId: PaneId,
         entry: FileEntry,
@@ -522,7 +775,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                     password = pane.activeArchivePassword
                 )
             } else {
-                // Extract virtual file to cache and open in default Android app
                 viewModelScope.launch {
                     _uiState.update {
                         it.copy(transferProgress = TransferProgress("Opening ${entry.name}...", 1, 1))
@@ -561,14 +813,9 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        // Open file in its default Android app
         onLaunchExternalFile(File(entry.path))
     }
 
-    /**
-     * Double Tap Handler (requested by user):
-     * Shows the detailed File Metadata, Permissions & Cryptographic Hashes Modal.
-     */
     fun onDoubleTapEntry(paneId: PaneId, entry: FileEntry) {
         setActivePane(paneId)
         val pane = _uiState.value.getPane(paneId)
@@ -608,10 +855,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /**
-     * Long Press Handler (requested by user):
-     * Opens natural file management operations (Copy, Cut, Paste, Pin, Compress, Extract, Rename, Delete, Multi-select).
-     */
     fun onLongPressEntry(paneId: PaneId, entry: FileEntry) {
         setActivePane(paneId)
         val pane = _uiState.value.getPane(paneId)
@@ -642,7 +885,6 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    // Selection, Search & Sort
     fun toggleSelection(paneId: PaneId, entry: FileEntry) {
         updatePaneState(paneId) { pane ->
             val next = pane.selectedKeys.toMutableSet()
@@ -721,6 +963,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
                 paneB = currentA.copy(paneId = PaneId.PANE_B)
             )
         }
+        refreshPaneComparison()
     }
 
     fun showDialog(dialog: PlainDialogState) {
@@ -800,29 +1043,82 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun deleteFileEntries(paneId: PaneId, entries: List<FileEntry>) {
+    fun deleteFileEntries(
+        paneId: PaneId,
+        entries: List<FileEntry>,
+        forcePermanent: Boolean = false
+    ) {
+        val currentDir = _uiState.value.getPane(paneId).currentPath
+        val shouldUseTrash = !forcePermanent &&
+            _uiState.value.settings.useTrashBin &&
+            !fileRepo.isTrashPath(currentDir)
+
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    activeDialog = null,
-                    transferProgress = TransferProgress("Deleting...", 0, entries.size)
+            if (shouldUseTrash) {
+                _uiState.update {
+                    it.copy(
+                        activeDialog = null,
+                        transferProgress = TransferProgress("Moving to Trash...", 0, entries.size)
+                    )
+                }
+                fileRepo.moveEntriesToTrash(entries) { cur, tot, msg ->
+                    _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+                }.fold(
+                    onSuccess = { records ->
+                        val label = if (records.size == 1) {
+                            "Trashed '${records.first().originalName}'"
+                        } else {
+                            "Trashed ${records.size} items"
+                        }
+                        _uiState.update {
+                            it.copy(
+                                transferProgress = null,
+                                trashUndoBatch = if (records.isNotEmpty()) {
+                                    TrashUndoBatch(records, paneId, label)
+                                } else {
+                                    null
+                                },
+                                trashItemCount = fileRepo.getTrashItemCount()
+                            )
+                        }
+                        clearSelection(paneId)
+                        reloadPane(PaneId.PANE_A)
+                        reloadPane(PaneId.PANE_B)
+                    },
+                    onFailure = { err ->
+                        _uiState.update {
+                            it.copy(transferProgress = null, toastMessage = "Trash Error: ${err.message}")
+                        }
+                    }
+                )
+            } else {
+                _uiState.update {
+                    it.copy(
+                        activeDialog = null,
+                        transferProgress = TransferProgress("Deleting permanently...", 0, entries.size)
+                    )
+                }
+                fileRepo.deleteEntries(entries) { cur, tot, msg ->
+                    _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
+                }.fold(
+                    onSuccess = {
+                        _uiState.update {
+                            it.copy(
+                                transferProgress = null,
+                                trashItemCount = fileRepo.getTrashItemCount()
+                            )
+                        }
+                        clearSelection(paneId)
+                        reloadPane(PaneId.PANE_A)
+                        reloadPane(PaneId.PANE_B)
+                    },
+                    onFailure = { err ->
+                        _uiState.update {
+                            it.copy(transferProgress = null, toastMessage = "Delete Error: ${err.message}")
+                        }
+                    }
                 )
             }
-            fileRepo.deleteEntries(entries) { cur, tot, msg ->
-                _uiState.update { it.copy(transferProgress = TransferProgress(msg, cur, tot)) }
-            }.fold(
-                onSuccess = {
-                    _uiState.update { it.copy(transferProgress = null) }
-                    clearSelection(paneId)
-                    reloadPane(PaneId.PANE_A)
-                    reloadPane(PaneId.PANE_B)
-                },
-                onFailure = { err ->
-                    _uiState.update {
-                        it.copy(transferProgress = null, toastMessage = "Delete Error: ${err.message}")
-                    }
-                }
-            )
         }
     }
 

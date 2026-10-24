@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,9 +53,6 @@ import com.plaintextfiles.explorer.ui.theme.LocalPlainTextPalette
 import java.io.File
 import java.util.Locale
 
-/**
- * Double-Tap File Details & Checksums Modal.
- */
 @Composable
 fun DoubleTapFileDetailsModal(
     paneId: PaneId,
@@ -326,9 +324,6 @@ fun AsciiTextField(
     }
 }
 
-/**
- * Host for Long-Press File Operations Sheet, Sort Modal, Batch Rename, Compress, Extract, etc.
- */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ActivePlainDialogHost(
@@ -339,6 +334,7 @@ fun ActivePlainDialogHost(
     onShareExternal: (File) -> Unit
 ) {
     val palette = LocalPlainTextPalette.current
+    val uiState by viewModel.uiState.collectAsState()
 
     Dialog(
         onDismissRequest = { viewModel.dismissDialog() },
@@ -346,7 +342,7 @@ fun ActivePlainDialogHost(
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.92f)
+                .fillMaxWidth(0.93f)
                 .background(palette.background)
                 .border(1.5.dp, palette.cyan)
                 .padding(10.dp)
@@ -357,6 +353,7 @@ fun ActivePlainDialogHost(
                     val first = entries.firstOrNull() ?: return@Box
                     val isSingle = entries.size == 1
                     val oppositeCode = dialogState.paneId.opposite().shortCode
+                    val inTrash = viewModel.fileRepo.isTrashPath(first.path)
 
                     Column(
                         modifier = Modifier
@@ -384,8 +381,7 @@ fun ActivePlainDialogHost(
                         }
                         AsciiDivider()
 
-                        // Natural file operations list
-                        if (isSingle && !first.isVirtualArchiveEntry) {
+                        if (isSingle && !first.isVirtualArchiveEntry && !inTrash) {
                             MenuOperationRow(
                                 label = if (first.isPinned) "☆ Unpin from Top of List" else "★ Pin to Top of Main List",
                                 color = palette.yellow
@@ -515,8 +511,20 @@ fun ActivePlainDialogHost(
                         }
 
                         if (!first.isVirtualArchiveEntry) {
+                            if (uiState.settings.useTrashBin && !inTrash) {
+                                MenuOperationRow(
+                                    label = "Move to Trash (${entries.size}) [Instant Undo]",
+                                    color = palette.orange
+                                ) {
+                                    viewModel.deleteFileEntries(
+                                        paneId = dialogState.paneId,
+                                        entries = entries,
+                                        forcePermanent = false
+                                    )
+                                }
+                            }
                             MenuOperationRow(
-                                label = "Delete (${entries.size})",
+                                label = if (inTrash) "Delete Forever (${entries.size})" else "Delete / Trash Options (${entries.size})...",
                                 color = palette.red
                             ) {
                                 viewModel.showDialog(PlainDialogState.DeleteConfirm(dialogState.paneId, entries))
@@ -525,8 +533,251 @@ fun ActivePlainDialogHost(
                     }
                 }
 
+                is PlainDialogState.ComparePanesModal -> {
+                    val summary = uiState.compareSummary
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "+-- [COMPARE & SYNC: P1 <-> P2] --+",
+                                color = palette.cyan,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            PlainTextActionLink(
+                                label = "CLOSE",
+                                accentColor = palette.red,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                        }
+                        AsciiDivider(char = '=', color = palette.cyan)
+
+                        if (summary == null) {
+                            Text(
+                                text = "Comparing panes...",
+                                color = palette.comment,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        } else {
+                            Text(
+                                text = "P1: ${summary.paneAPath}
+P2: ${summary.paneBPath}",
+                                color = palette.comment,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp
+                            )
+                            AsciiDivider()
+
+                            AsciiMetadataRow("ONLY IN P1", "+${summary.onlyInA.size} unique item(s)  [+P1]")
+                            AsciiMetadataRow("ONLY IN P2", "+${summary.onlyInB.size} unique item(s)  [+P2]")
+                            AsciiMetadataRow("NEWER P1", "~${summary.newerInA.size} modified item(s) [~NEW]")
+                            AsciiMetadataRow("NEWER P2", "~${summary.newerInB.size} modified item(s) [~NEW]")
+                            AsciiMetadataRow("IDENTICAL", "=${summary.identicalCount} matching item(s)")
+
+                            val previewDiffs = buildList {
+                                summary.onlyInA.take(3).forEach { add("[+P1] ${it.name}" to palette.green) }
+                                summary.onlyInB.take(3).forEach { add("[+P2] ${it.name}" to palette.cyan) }
+                                summary.newerInA.take(2).forEach { add("[~P1] ${it.name}" to palette.orange) }
+                                summary.newerInB.take(2).forEach { add("[~P2] ${it.name}" to palette.yellow) }
+                            }
+                            if (previewDiffs.isNotEmpty()) {
+                                AsciiDivider()
+                                previewDiffs.take(6).forEach { (line, col) ->
+                                    Text(
+                                        text = " $line",
+                                        color = col,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.5.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            AsciiDivider()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Show Inline Diff Badges on Main List",
+                                    color = palette.foreground,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp
+                                )
+                                PlainTextActionLink(
+                                    label = if (uiState.settings.showDiffHighlights) "ON" else "OFF",
+                                    isActive = uiState.settings.showDiffHighlights,
+                                    accentColor = palette.green,
+                                    onClick = { viewModel.toggleDiffHighlights() }
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(4.dp))
+                            MenuOperationRow(
+                                label = "Sync P1 -> P2 (Copy ${summary.syncAToBEntries.size} Missing / Newer)",
+                                color = palette.green
+                            ) {
+                                viewModel.syncMissingAndNewer(PaneId.PANE_A)
+                            }
+                            MenuOperationRow(
+                                label = "Sync P2 -> P1 (Copy ${summary.syncBToAEntries.size} Missing / Newer)",
+                                color = palette.cyan
+                            ) {
+                                viewModel.syncMissingAndNewer(PaneId.PANE_B)
+                            }
+                            if (summary.onlyInA.isNotEmpty()) {
+                                MenuOperationRow(
+                                    label = "Select ${summary.onlyInA.size} Unique Item(s) in P1",
+                                    color = palette.yellow
+                                ) {
+                                    viewModel.selectUniqueInPane(PaneId.PANE_A)
+                                }
+                            }
+                            if (summary.onlyInB.isNotEmpty()) {
+                                MenuOperationRow(
+                                    label = "Select ${summary.onlyInB.size} Unique Item(s) in P2",
+                                    color = palette.yellow
+                                ) {
+                                    viewModel.selectUniqueInPane(PaneId.PANE_B)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                is PlainDialogState.IncomingShareModal -> {
+                    var zipBase by remember { mutableStateOf("shared_bundle") }
+                    val paneADir = uiState.paneA.currentPath
+                    val paneBDir = uiState.paneB.currentPath
+                    val countLabel = if (dialogState.items.isNotEmpty()) {
+                        "${dialogState.items.size} FILE(S)"
+                    } else {
+                        "SHARED TEXT"
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "+-- [SHARE TO exp-txt :: $countLabel] --+",
+                                color = palette.green,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            PlainTextActionLink(
+                                label = "CANCEL",
+                                accentColor = palette.red,
+                                onClick = { viewModel.dismissDialog() }
+                            )
+                        }
+                        AsciiDivider(char = '=', color = palette.green)
+
+                        dialogState.items.take(5).forEach { item ->
+                            Text(
+                                text = " • ${item.displayName} (${FileSystemRepository.formatBytes(item.sizeBytes)})",
+                                color = palette.foreground,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                maxLines = 1
+                            )
+                        }
+                        if (dialogState.items.size > 5) {
+                            Text(
+                                text = "   ...and ${dialogState.items.size - 5} more item(s)",
+                                color = palette.comment,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.5.sp
+                            )
+                        }
+                        if (dialogState.items.isEmpty() && !dialogState.sharedText.isNullOrBlank()) {
+                            Text(
+                                text = " "${dialogState.sharedText.take(120)}"",
+                                color = palette.yellow,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.5.sp
+                            )
+                        }
+
+                        AsciiDivider()
+                        AsciiTextField(
+                            value = zipBase,
+                            onValueChange = { zipBase = it },
+                            label = "OPTIONAL .ZIP ARCHIVE NAME"
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+
+                        MenuOperationRow(
+                            label = "Save Directly to P1 (${paneADir.substringAfterLast('/').ifEmpty { "/" }})",
+                            color = palette.green
+                        ) {
+                            viewModel.saveIncomingShare(
+                                targetPaneId = PaneId.PANE_A,
+                                items = dialogState.items,
+                                sharedText = dialogState.sharedText,
+                                compressToZip = false
+                            )
+                        }
+                        MenuOperationRow(
+                            label = "Save Directly to P2 (${paneBDir.substringAfterLast('/').ifEmpty { "/" }})",
+                            color = palette.cyan
+                        ) {
+                            viewModel.saveIncomingShare(
+                                targetPaneId = PaneId.PANE_B,
+                                items = dialogState.items,
+                                sharedText = dialogState.sharedText,
+                                compressToZip = false
+                            )
+                        }
+                        MenuOperationRow(
+                            label = "Compress into $zipBase.zip in P1",
+                            color = palette.pink
+                        ) {
+                            viewModel.saveIncomingShare(
+                                targetPaneId = PaneId.PANE_A,
+                                items = dialogState.items,
+                                sharedText = dialogState.sharedText,
+                                compressToZip = true,
+                                zipBaseName = zipBase
+                            )
+                        }
+                        MenuOperationRow(
+                            label = "Compress into $zipBase.zip in P2",
+                            color = palette.orange
+                        ) {
+                            viewModel.saveIncomingShare(
+                                targetPaneId = PaneId.PANE_B,
+                                items = dialogState.items,
+                                sharedText = dialogState.sharedText,
+                                compressToZip = true,
+                                zipBaseName = zipBase
+                            )
+                        }
+                    }
+                }
+
                 is PlainDialogState.SortModal -> {
-                    val pane = viewModel.uiState.value.getPane(dialogState.paneId)
+                    val pane = uiState.getPane(dialogState.paneId)
                     val currentSort = pane.sortConfig
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
@@ -759,21 +1010,18 @@ fun ActivePlainDialogHost(
                 }
 
                 is PlainDialogState.DeleteConfirm -> {
+                    val panePath = uiState.getPane(dialogState.paneId).currentPath
+                    val alreadyInTrash = viewModel.fileRepo.isTrashPath(panePath)
+
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "+-- [CONFIRM DELETE] --+",
+                            text = "+-- [DELETE / TRASH ${dialogState.entries.size} ITEM(S)] --+",
                             color = palette.red,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
                         AsciiDivider(color = palette.red)
-                        Text(
-                            text = "Permanently delete ${dialogState.entries.size} item(s)?",
-                            color = palette.foreground,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp
-                        )
                         dialogState.entries.take(5).forEach { item ->
                             Text(
                                 text = " - ${item.name}",
@@ -784,20 +1032,40 @@ fun ActivePlainDialogHost(
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             PlainTextActionLink(
                                 label = "CANCEL",
                                 accentColor = palette.comment,
                                 onClick = { viewModel.dismissDialog() }
                             )
-                            PlainTextActionLink(
-                                label = "DELETE",
-                                accentColor = palette.red,
-                                onClick = {
-                                    viewModel.deleteFileEntries(dialogState.paneId, dialogState.entries)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (!alreadyInTrash) {
+                                    PlainTextActionLink(
+                                        label = "MOVE TO TRASH",
+                                        accentColor = palette.yellow,
+                                        onClick = {
+                                            viewModel.deleteFileEntries(
+                                                paneId = dialogState.paneId,
+                                                entries = dialogState.entries,
+                                                forcePermanent = false
+                                            )
+                                        }
+                                    )
                                 }
-                            )
+                                PlainTextActionLink(
+                                    label = "DELETE FOREVER",
+                                    accentColor = palette.red,
+                                    onClick = {
+                                        viewModel.deleteFileEntries(
+                                            paneId = dialogState.paneId,
+                                            entries = dialogState.entries,
+                                            forcePermanent = true
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
                 }

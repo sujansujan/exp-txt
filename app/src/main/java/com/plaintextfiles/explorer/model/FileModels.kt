@@ -36,6 +36,9 @@ data class AppSettings(
     val globalPinnedAtTop: Boolean = true,
     val rememberLastPaths: Boolean = true,
     val enableRowSwipeGesture: Boolean = true,
+    val showFastScrollRail: Boolean = true,
+    val useTrashBin: Boolean = true,
+    val showDiffHighlights: Boolean = false,
     val splitRatio: Float = 0.50f
 )
 
@@ -111,6 +114,48 @@ enum class PlainFileCategory(val asciiBadge: String, val shortCode: String) {
     EXECUTABLE("[EXE]", "EXE"),
     BINARY("[FIL]", "FIL")
 }
+
+enum class DiffStatus(val badge: String) {
+    NONE(""),
+    ONLY_IN_P1("[+P1]"),
+    ONLY_IN_P2("[+P2]"),
+    NEWER_HERE("[~NEW]"),
+    OLDER_HERE("[~OLD]"),
+    SIZE_DIFF("[~SIZ]"),
+    IDENTICAL("[=]")
+}
+
+data class PaneComparisonSummary(
+    val paneAPath: String,
+    val paneBPath: String,
+    val onlyInA: List<FileEntry>,
+    val onlyInB: List<FileEntry>,
+    val newerInA: List<FileEntry>,
+    val newerInB: List<FileEntry>,
+    val identicalCount: Int
+) {
+    val syncAToBEntries: List<FileEntry> get() = onlyInA + newerInA
+    val syncBToAEntries: List<FileEntry> get() = onlyInB + newerInB
+}
+
+data class TrashRecord(
+    val trashedFilePath: String,
+    val originalFilePath: String,
+    val originalName: String,
+    val deletedAtMillis: Long
+)
+
+data class TrashUndoBatch(
+    val records: List<TrashRecord>,
+    val sourcePaneId: PaneId,
+    val summaryLabel: String
+)
+
+data class SharedIncomingItem(
+    val uriString: String,
+    val displayName: String,
+    val sizeBytes: Long
+)
 
 data class FileEntry(
     val name: String,
@@ -207,6 +252,7 @@ data class PaneState(
     val sortConfig: SortConfig = SortConfig(),
     val searchQuery: String = "",
     val isSearchVisible: Boolean = false,
+    val isPathEditorVisible: Boolean = false,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val historyBackStack: List<Pair<String, Pair<String?, String>>> = emptyList(),
