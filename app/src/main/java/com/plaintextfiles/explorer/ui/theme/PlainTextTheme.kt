@@ -120,7 +120,7 @@ val PlainTextTypography = Typography(
     ),
     bodySmall = TextStyle(
         fontFamily = FontFamily.Monospace,
-        fontWeight = FontFamily.Normal,
+        fontWeight = FontWeight.Normal,
         fontSize = 11.sp,
         lineHeight = 14.sp
     ),
