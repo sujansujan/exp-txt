@@ -222,7 +222,7 @@ class FileSystemRepository(private val context: Context) {
                 md5 = null,
                 sha1 = null,
                 sha256 = null,
-                crc32Hex = crcHex,
+                crc32Hex = crc32Hex,
                 archiveSummary = null
             )
         }
@@ -314,7 +314,7 @@ class FileSystemRepository(private val context: Context) {
             md5 = md5Hex,
             sha1 = sha1Hex,
             sha256 = sha256Hex,
-            crc32Hex = crcHex,
+            crc32Hex = crc32Hex,
             archiveSummary = archiveSummary
         )
     }

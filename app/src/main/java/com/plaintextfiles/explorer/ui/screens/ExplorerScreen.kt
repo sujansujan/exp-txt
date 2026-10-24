@@ -11,7 +11,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -149,14 +149,19 @@ fun ExplorerScreen(
         }
 
         // 4. Main Dual-Pane / Single-Pane File Workspace (Maximized Space)
-        BoxWithConstraints(
+        var totalHeightPx by remember { mutableFloatStateOf(1000f) }
+        var totalWidthPx by remember { mutableFloatStateOf(1000f) }
+        val splitRatio = state.settings.splitRatio
+
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
+                .onSizeChanged { sz ->
+                    totalWidthPx = sz.width.toFloat().coerceAtLeast(1f)
+                    totalHeightPx = sz.height.toFloat().coerceAtLeast(1f)
+                }
         ) {
-            val totalHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
-            val totalWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
-            val splitRatio = state.settings.splitRatio
 
             when (state.settings.dualPaneMode) {
                 DualPaneMode.SPLIT_VERTICAL -> {
@@ -745,8 +750,7 @@ fun CompactFilePane(
                 available: Offset,
                 source: NestedScrollSource
             ): Offset {
-                if (source == NestedScrollSource.UserInput &&
-                    available.y > 0f &&
+                if (available.y > 0f &&
                     listState.firstVisibleItemIndex == 0 &&
                     listState.firstVisibleItemScrollOffset == 0
                 ) {
